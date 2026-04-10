@@ -1,0 +1,21 @@
+# BootstrapProvider for cluster-api-operator.
+#
+# Option A: Fetch the stock v0.7.0-alpha.1 release. The CRDs from
+#           kustomization.yaml override the bundled ones.
+#
+# Option B: Build a custom bootstrap-components.yaml and point
+#           fetchConfig.url to it (see comments below).
+---
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
+kind: BootstrapProvider
+metadata:
+  name: talos
+  namespace: cabpt-system
+spec:
+  version: v0.7.0-alpha.1
+  fetchConfig:
+    # Stock release -- CRDs are overridden by the kustomize overlay.
+    url: https://github.com/siderolabs/cluster-api-bootstrap-provider-talos/releases/download/v0.7.0-alpha.1/bootstrap-components.yaml
+
+    # To use a fully custom build instead, replace the url above:
+    # url: https://<your-host>/bootstrap-components.yaml

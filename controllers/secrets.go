@@ -165,24 +165,60 @@ func (r *TalosConfigReconciler) writeK8sCASecret(ctx context.Context, scope *Tal
 	return nil
 }
 
-// writeBootstrapData creates a new secret with the data passed in as input
-func (r *TalosConfigReconciler) writeBootstrapData(ctx context.Context, scope *TalosConfigScope, data []byte) (string, error) {
-	// Create bootstrap secret only if it doesn't already exist
-	ownerName := scope.ConfigOwner.GetName()
-	dataSecretName := ownerName + "-bootstrap-data"
+// writeBootstrapData creates or updates the bootstrap data secret.
+//
+// When metadataPending is true (Phase 1), an empty secret is created (no data keys)
+// so that Machine.Status.BootstrapReady is triggered and CAPM3 can progress, but
+// BMO has nothing to provision with. When metadataPending is false (Phase 2 or
+// single-phase), the secret is written with the configured dataSecretKey containing
+// the complete config.
+func (r *TalosConfigReconciler) writeBootstrapData(ctx context.Context, scope *TalosConfigScope, data []byte, metadataPending bool) (string, error) {
+	// Name the secret after the TalosConfig (not the Machine) so that it matches
+	// Machine.Spec.Bootstrap.ConfigRef.Name. CAPM3 falls back to ConfigRef.Name when
+	// Machine.Spec.Bootstrap.DataSecretName is not yet set (race between CAPI spec
+	// and status patches). Using the TalosConfig name makes both CAPM3 code paths
+	// resolve to the same secret.
+	dataSecretName := scope.Config.Name
 
-	r.Log.Info("handling bootstrap data for ", "owner", ownerName)
+	r.Log.Info("handling bootstrap data for ", "config", scope.Config.Name)
 
-	_, err := r.fetchSecret(ctx, scope.Config, dataSecretName)
+	secretKey := "value"
+	if scope.Config.Spec.DataSecretKey != "" {
+		secretKey = scope.Config.Spec.DataSecretKey
+	}
+
+	existing, err := r.fetchSecret(ctx, scope.Config, dataSecretName)
 	if err == nil {
-		return dataSecretName, nil
+		if metadataPending {
+			// Phase 1 already completed on a previous reconcile — secret exists, metadata still pending.
+			return dataSecretName, nil
+		}
+
+		// Phase 2: update the existing secret with the complete config.
+		existing.Data = map[string][]byte{
+			secretKey: data,
+		}
+
+		r.Log.Info("updating bootstrap secret with complete config (Phase 2)", "secret", dataSecretName, "key", secretKey)
+
+		return dataSecretName, r.Client.Update(ctx, existing)
 	}
 
 	if !k8serrors.IsNotFound(err) {
 		return dataSecretName, err
 	}
 
-	certSecret := &corev1.Secret{
+	// Determine secret data: Phase 1 creates an empty secret (no data keys)
+	// so BMO has nothing to provision with. Phase 2 / single-phase writes the
+	// complete config.
+	secretData := map[string][]byte{}
+	if !metadataPending {
+		secretData[secretKey] = data
+	} else {
+		r.Log.Info("creating empty bootstrap secret (Phase 1, no data keys)", "secret", dataSecretName)
+	}
+
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: scope.Config.Namespace,
 			Name:      dataSecretName,
@@ -193,12 +229,10 @@ func (r *TalosConfigReconciler) writeBootstrapData(ctx context.Context, scope *T
 				*metav1.NewControllerRef(scope.Config, bootstrapv1beta1.GroupVersion.WithKind("TalosConfig")),
 			},
 		},
-		Data: map[string][]byte{
-			"value": data,
-		},
+		Data: secretData,
 	}
 
-	err = r.Client.Create(ctx, certSecret)
+	err = r.Client.Create(ctx, secret)
 
 	return dataSecretName, err
 }
