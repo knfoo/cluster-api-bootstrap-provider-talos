@@ -38,7 +38,12 @@ the drop below.
 | 6 | `8ecdfbc` | docs(phase0): update ADRs and ledger | tooling | ADR-0001 |
 | 7 | `0b6ba30` | chore(phase0): fix sync-dryrun workflow to use GITHUB_TOKEN | tooling | ADR-0001 |
 | 8 | `ddf0a73` | docs(phase0): update ADR-0001 to accepted with Day 4 evidence and go/no-go note | tooling | ADR-0001 |
-| 9 | `037cceb` | fix(phase0): pin gh to our own repo, restore the GitHub App token for sync | tooling | ADR-0001 |
+| 9 | `ddb9c31` | fix(phase0): pin gh to our own repo, restore the GitHub App token for sync | tooling | ADR-0001 |
+| 10 | `bd1420b` | docs(phase0): re-baseline on sidero-community CABPT (ADR-0004) | tooling | ADR-0004 |
+| 11 | `6b16d1f` | docs(phase0): baseline evidence on sidero-community v0.9.0 | tooling | ADR-0004 |
+| 12 | `57ef7cf` | docs(phase0): capi-watch evidence from CI after re-baseline | tooling | ADR-0004 |
+| 13 | `3a740c4` | docs(phase0): accept ADR-0001 with dry-run evidence | tooling | ADR-0001 |
+| 14 | `6dd7d46` | fix(phase0): kit review fixes (zero-test guard, tag, pin, touched files) | tooling | ADR-0001 |
 
 ## Dropped / absorbed upstream
 
