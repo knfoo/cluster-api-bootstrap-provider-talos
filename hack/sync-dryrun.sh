@@ -5,6 +5,10 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# gh defaults to a remote named `upstream`; pin it to our own repo so no PR or issue
+# can ever be opened upstream (scope rule).
+export GH_REPO="${GH_REPO:-${GITHUB_REPOSITORY:-$(git remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')}}"
+
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 BASE_REF="${BASE_REF:-origin/$BASE_BRANCH}"       # override only for the forced day-4 exercise
@@ -86,7 +90,7 @@ git commit -q -m "sync: merge $SYNC_TARGET ($SHORT) (dry-run)"
 {
   echo "Dry-run sync of \`$SYNC_TARGET\` (\`$SHORT\`, $UPSTREAM_COMMITS upstream commits): clean merge."
   echo; echo '```'; git diff --stat "$BASE_SHA"..HEAD; echo '```'
-  echo; echo "CAPI: \`$(capi_at "$BASE_SHA")\` \u2192 \`$(capi_at "$TARGET_SHA")\`"
+  echo; echo "CAPI: \`$(capi_at "$BASE_SHA")\` → \`$(capi_at "$TARGET_SHA")\`"
   echo; echo "**DO NOT MERGE.** Phase 0/1 dry run. Promotion gates arrive in Phase 2."
 } > "$OUT/body.md"
 git push -q origin "$BRANCH"
