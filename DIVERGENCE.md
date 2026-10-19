@@ -7,7 +7,7 @@
 - **Upstream push:** disabled (`git remote set-url --push upstream no-push`)
 - **Baseline date:** 2026-10-19
 - **Measured at baseline:** 0 commits ahead / 7 behind — caught up via fast-forward
-- **Evidence:** ADR-0001
+- **Evidence:** ADR-0001, ADR-0003
 
 ## Standing rule
 
@@ -21,7 +21,12 @@ file is out of date.
 
 | # | Patch | Title | ADR | Category | Absorbed upstream? |
 |---|---|---|---|---|---|
-| 1 | `<sha of the kit commit>` | phase0: fork-maintenance kit (hack/, workflows, DIVERGENCE.md) | ADR-0001 | tooling | n/a |
+| 1 | `66a777a` | docs: record kit commits in divergence ledger | ADR-0001 | tooling | n/a |
+| 2 | `0719b9a` | docs(phase0): add ADR-0001 (proposed) | ADR-0001 | tooling | n/a |
+| 3 | `714ca95` | chore(phase0): add fork-maintenance kit (baseline, sync dry-run, workflows) | ADR-0001 | tooling | n/a |
+| 4 | `b5956c6` | chore(phase0): fix fork-maintenance kit - baseline | ADR-0001 | tooling | n/a |
+| 5 | `47066e0` | chore(phase0): kit v3 (json guards, sync on main, capi-watch, ledger-check) | ADR-0001 | tooling | n/a |
+
 
 ## Categories
 
