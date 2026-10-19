@@ -1,4 +1,8 @@
 # Tests that must actually PASS for a green baseline: not skip, not filtered out.
 # Add a test when it is load-bearing evidence; remove one only with an ADR.
-# CABPT note: No non-integration tests exist. TestIntegration is tier-3 e2e.
-# Tracked in ADR-0003.
+# CABPT has no envtest tests outside TestIntegration (needs a real cluster, skipped);
+# these controller/webhook tests are the load-bearing evidence instead (ADR-0004).
+TestReconcileWritesOnlyV1Beta2Conditions              # CAPI v1beta2 contract
+TestReconcileRendersTheInstallerImageAsADocument      # Talos 1.14 install document
+TestMachinePoolInPlace_MachineOwnedConfigIsUntouched  # in-place updates
+TestValidateUpdate_SpecIsImmutableByDefault           # TalosConfig webhook

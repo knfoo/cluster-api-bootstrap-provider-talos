@@ -1,6 +1,7 @@
 # ADR 0003: CABPT test suite limitation for Phase 0 baseline
 
-- **Status:** proposed
+- **Status:** superseded by ADR-0004 (2026-10-19). Never accepted: the vacuous
+  green it described came from tracking the deprecated siderolabs upstream.
 - **Context:** CABPT's test suite consists solely of `TestIntegration` in `internal/integration/`, which:
   1. Requires `TalosVersion` to be non-empty (set by build process, empty in test env)
   2. Is a tier-3 e2e test that provisions real infrastructure

@@ -1,4 +1,2 @@
-66a777a tooling ADR-0001 # docs: record kit commits in divergence ledger
-0719b9a tooling ADR-0001 # docs(phase0): add ADR-0001 (proposed)
-714ca95 tooling ADR-0001 # chore(phase0): add fork-maintenance kit (baseline, sync dry-run, workflows)
-b5956c6 tooling ADR-0001 # chore(phase0): fix fork-maintenance kit - baseline
+# Pre-trailer commits (sha category ADR # title). Empty since the ADR-0004
+# re-baseline: every replayed commit carries a Divergence trailer.
