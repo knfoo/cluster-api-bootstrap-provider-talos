@@ -30,20 +30,23 @@ the drop below.
 
 | # | Patch | Title | Category | ADR |
 |---|---|---|---|---|
-| 1 | `27673c7` | docs: record kit commits in divergence ledger | tooling | ADR-0001 |
-| 2 | `5f9bc7b` | docs(phase0): add ADR-0001 (proposed) | tooling | ADR-0001 |
-| 3 | `c140baf` | chore(phase0): add fork-maintenance kit (baseline, sync dry-run, workflows) | tooling | ADR-0001 |
-| 4 | `4965ea7` | chore(phase0): fix fork-maintenance kit - baseline | tooling | ADR-0001 |
-| 5 | `2eef9b3` | chore(phase0): kit v3 (json guards, sync on main, capi-watch, ledger-check) | tooling | ADR-0001 |
-| 6 | `8ecdfbc` | docs(phase0): update ADRs and ledger | tooling | ADR-0001 |
-| 7 | `0b6ba30` | chore(phase0): fix sync-dryrun workflow to use GITHUB_TOKEN | tooling | ADR-0001 |
-| 8 | `ddf0a73` | docs(phase0): update ADR-0001 to accepted with Day 4 evidence and go/no-go note | tooling | ADR-0001 |
-| 9 | `ddb9c31` | fix(phase0): pin gh to our own repo, restore the GitHub App token for sync | tooling | ADR-0001 |
-| 10 | `bd1420b` | docs(phase0): re-baseline on sidero-community CABPT (ADR-0004) | tooling | ADR-0004 |
-| 11 | `6b16d1f` | docs(phase0): baseline evidence on sidero-community v0.9.0 | tooling | ADR-0004 |
-| 12 | `57ef7cf` | docs(phase0): capi-watch evidence from CI after re-baseline | tooling | ADR-0004 |
-| 13 | `3a740c4` | docs(phase0): accept ADR-0001 with dry-run evidence | tooling | ADR-0001 |
-| 14 | `6dd7d46` | fix(phase0): kit review fixes (zero-test guard, tag, pin, touched files) | tooling | ADR-0001 |
+| 1 | `9a46ec5` | docs: record kit commits in divergence ledger | tooling | ADR-0001 |
+| 2 | `4d676ec` | docs(phase0): add ADR-0001 (proposed) | tooling | ADR-0001 |
+| 3 | `a8d5583` | chore(phase0): add fork-maintenance kit (baseline, sync dry-run, workflows) | tooling | ADR-0001 |
+| 4 | `ea79cfc` | chore(phase0): fix fork-maintenance kit - baseline | tooling | ADR-0001 |
+| 5 | `79d3605` | chore(phase0): kit v3 (json guards, sync on main, capi-watch, ledger-check) | tooling | ADR-0001 |
+| 6 | `aa5680a` | docs(phase0): update ADRs and ledger | tooling | ADR-0001 |
+| 7 | `51dab6d` | chore(phase0): fix sync-dryrun workflow to use GITHUB_TOKEN | tooling | ADR-0001 |
+| 8 | `10d9e3d` | docs(phase0): update ADR-0001 to accepted with Day 4 evidence and go/no-go note | tooling | ADR-0001 |
+| 9 | `8c52cad` | fix(phase0): pin gh to our own repo, restore the GitHub App token for sync | tooling | ADR-0001 |
+| 10 | `f67af60` | docs(phase0): re-baseline on sidero-community CABPT (ADR-0004) | tooling | ADR-0004 |
+| 11 | `fab908d` | docs(phase0): baseline evidence on sidero-community v0.9.0 | tooling | ADR-0004 |
+| 12 | `6c4b361` | docs(phase0): capi-watch evidence from CI after re-baseline | tooling | ADR-0004 |
+| 13 | `696d379` | docs(phase0): accept ADR-0001 with dry-run evidence | tooling | ADR-0001 |
+| 14 | `33d472d` | fix(phase0): kit review fixes (zero-test guard, tag, pin, touched files) | tooling | ADR-0001 |
+| 15 | `5abd9d0` | docs(phase0): baseline evidence after kit review fixes | tooling | ADR-0001 |
+| 16 | `7d44f3d` | feat(phase0): known-red baselines via KNOWN_RED_ALLOW | tooling | ADR-0001 |
+| 17 | `87ad645` | docs(phase0): back to siderolabs CABPT, known-red baseline (ADR-0005) | tooling | ADR-0005 |
 
 ## Dropped / absorbed upstream
 
