@@ -1,0 +1,36 @@
+{
+  "kind": "sync-dryrun",
+  "phase": "0",
+  "repo": "cluster-api-bootstrap-provider-talos",
+  "date": "2026-10-19T13:55:13Z",
+  "base_ref": "origin/main",
+  "base_sha": "7b260d8ad90ccf636d4d048b805d4005e92e7741",
+  "target_ref": "upstream/main",
+  "target_sha": "411408aad84277c1f5946b99b309ee8a99819ead",
+  "upstream_commits": 0,
+  "result": "noop",
+  "url": "",
+  "capi_before": "v1.12.11",
+  "capi_after": "v1.12.11",
+  "conflict_files": [],
+  "files_touched": [
+    ".divergence-allow",
+    ".github/workflows/baseline.yml",
+    ".github/workflows/capi-watch.yml",
+    ".github/workflows/sync-dryrun.yml",
+    "DIVERGENCE.md",
+    "docs/adr/0001-phase0-baseline.md",
+    "docs/adr/0003-cabpt-test-suite.md",
+    "evidence/baseline/baseline.json",
+    "hack/baseline.sh",
+    "hack/capi-watch.sh",
+    "hack/ledger-check.sh",
+    "hack/must-run.txt",
+    "hack/sync-dryrun.sh"
+  ],
+  "workflow_files_touched": [
+    ".github/workflows/baseline.yml",
+    ".github/workflows/capi-watch.yml",
+    ".github/workflows/sync-dryrun.yml"
+  ]
+}
