@@ -1,12 +1,12 @@
 # Divergence Ledger — cluster-api-bootstrap-provider-talos
 
 - **Repo:** knfoo/cluster-api-bootstrap-provider-talos
-- **Provider upstream (`upstream` remote):** https://github.com/sidero-community/cluster-api-bootstrap-provider-talos, branch `main` (siderolabs until ADR-0004)
+- **Provider upstream (`upstream` remote):** https://github.com/siderolabs/cluster-api-bootstrap-provider-talos, branch `main` (sidero-community between ADR-0004 and ADR-0005)
 - **Contract upstream:** kubernetes-sigs/cluster-api (tracked by `hack/capi-watch.sh`)
 - **Upstream push:** disabled (`git remote set-url --push upstream no-push`)
-- **Baseline date:** 2026-10-19 (re-baselined onto sidero-community v0.9.0 the same day, ADR-0004)
-- **Measured at baseline:** siderolabs: 0 ahead / 7 behind → fast-forwarded; sidero-community: tooling replayed onto `upstream/main`
-- **Evidence:** ADR-0001, ADR-0004, `evidence/`
+- **Baseline date:** 2026-10-19 (re-baselined twice the same day: ADR-0004, ADR-0005)
+- **Measured at baseline:** siderolabs: 0 ahead / 7 behind → fast-forwarded; after each upstream switch, tooling replayed onto `upstream/main`
+- **Evidence:** ADR-0001, ADR-0005, `evidence/`
 
 ## Standing rule (enforced by CI)
 

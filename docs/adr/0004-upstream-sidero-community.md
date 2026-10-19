@@ -1,6 +1,6 @@
 # ADR 0004: Track sidero-community as CABPT's provider upstream
 
-- **Status:** accepted (2026-10-19)
+- **Status:** superseded by ADR-0005 (2026-10-19): back to siderolabs.
 - **Context:** Phase 0 started with `siderolabs/cluster-api-bootstrap-provider-talos`
   as the provider upstream. The day-4 review found that:
   - siderolabs CABPT is deprecated (`855be5e`, "no longer actively developing").
