@@ -1,0 +1,4 @@
+# Tests that must actually PASS for a green baseline: not skip, not filtered out.
+# Add a test when it is load-bearing evidence; remove one only with an ADR.
+# CABPT note: No non-integration tests exist. TestIntegration is tier-3 e2e.
+# Tracked in ADR-0003.
