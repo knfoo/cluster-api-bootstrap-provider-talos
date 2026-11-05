@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
-	bsutil "sigs.k8s.io/cluster-api/bootstrap/util"
+	bsutil "sigs.k8s.io/cluster-api/bootstrap/kubeadm/reconcilers/kubeadmconfig"
 	"sigs.k8s.io/cluster-api/feature"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
