@@ -140,10 +140,16 @@ spec:
                 description: TalosConfigTemplateResource defines the Template structure
                 properties:
                   spec:
-                    description: TalosConfigSpec defines the desired state of TalosConfig
+                    description: |-
+                      TalosConfigSpec defines the desired state of TalosConfig.
+
+                      Some fields can be changed in place on an existing Machine; changing any other field requires a
+                      Machine rollout.
                     properties:
                       configPatches:
-                        description: RFC6902 JSON patches to apply to machine configuration.
+                        description: |-
+                          RFC6902 JSON patches to apply to machine configuration.
+                          Mutable: applied in place to the Machine configuration.
                         items:
                           properties:
                             op:
@@ -158,12 +164,15 @@ spec:
                           type: object
                         type: array
                       data:
-                        description: Machine configuration in case generateType=none.
+                        description: |-
+                          Machine configuration in case generateType=none.
+                          Mutable: applied in place to the Machine configuration.
                         type: string
                       generateType:
                         description: |-
                           Talos machine configuration type to generate: Supported values are:
                           controlplane, worker, init (deprecated), none (configuration must be then provided in data field).
+                          Immutable: changing it requires a Machine rollout.
                         enum:
                         - controlplane
                         - worker
@@ -171,8 +180,9 @@ spec:
                         - none
                         type: string
                       hostname:
-                        description: Set hostname in the machine configuration to
-                          some value.
+                        description: |-
+                          Set hostname in the machine configuration to some value.
+                          Immutable: the hostname is part of the Machine identity, changing it requires a Machine rollout.
                         properties:
                           source:
                             description: |-
@@ -184,8 +194,9 @@ spec:
                             type: string
                         type: object
                       strategicPatches:
-                        description: Talos Linux machine configuration strategic merge
-                          patch list.
+                        description: |-
+                          Talos Linux machine configuration strategic merge patch list.
+                          Mutable: applied in place to the Machine configuration.
                         items:
                           type: string
                         type: array
@@ -194,6 +205,7 @@ spec:
                           Version of Talos to generate machine configuration for, i.e. v1.0 (patch version may be omitted).
                           Defaults to the latest supported version if unspecified.
                           It is recommended to set this field explicitly to avoid unexpected issues during provider upgrades.
+                          Immutable: changing the Talos version requires a Machine rollout.
                         type: string
                     required:
                     - generateType

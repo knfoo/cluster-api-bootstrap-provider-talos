@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/cluster-api/feature"
 	"sigs.k8s.io/cluster-api/util/topology"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -44,8 +45,26 @@ func (r *TalosConfig) ValidateUpdate(ctx context.Context, oldObj *TalosConfig, n
 	}
 
 	// Skip the immutability check if the request is a dry-run issued by the topology controller (#257)
-	if !topology.IsDryRunRequest(req, r) && !cmp.Equal(r.Spec, old.Spec) {
+	if topology.IsDryRunRequest(req, r) || cmp.Equal(r.Spec, old.Spec) {
+		return nil, r.validate()
+	}
+
+	// The relaxed immutability check is only in effect while the InPlaceUpdates feature gate is
+	// enabled (alpha, off by default). Without the gate no controller performs in-place updates, so
+	// the whole spec stays immutable, exactly as before. Cluster API gates its in-place update code
+	// the same way: KCP's canUpdateMachine returns false when the gate is off
+	// (inplace_canupdatemachine.go:52).
+	if !feature.Gates.Enabled(feature.InPlaceUpdates) {
 		return nil, apierrors.NewBadRequest("TalosConfig.Spec is immutable")
+	}
+
+	// In-place updates: only the machine-config content (data, configPatches, strategicPatches)
+	// may change. Everything else in the spec is immutable and needs a rollout.
+	// The classification follows the CAPI bootstrap contract and KCP's CanUpdateMachine, which
+	// patches only the bootstrap config fields that do not decide how the machine is generated
+	// (inplace_canupdatemachine.go:44-87).
+	if err := r.validateImmutableFields(old); err != nil {
+		return nil, err
 	}
 
 	return nil, r.validate()
@@ -54,6 +73,37 @@ func (r *TalosConfig) ValidateUpdate(ctx context.Context, oldObj *TalosConfig, n
 // ValidateDelete implements admission.Validator so a webhook will be registered for the type
 func (r *TalosConfig) ValidateDelete(ctx context.Context, obj *TalosConfig) (admission.Warnings, error) {
 	return nil, nil
+}
+
+// validateImmutableFields rejects a spec change that touches an immutable field.
+// Mutable fields (data, configPatches, strategicPatches) are allowed to change: the update
+// extension reconciles them on the running machine.
+func (r *TalosConfig) validateImmutableFields(old *TalosConfig) error {
+	var allErrs field.ErrorList
+	spec := field.NewPath("spec")
+
+	if r.Spec.GenerateType != old.Spec.GenerateType {
+		allErrs = append(allErrs, field.Invalid(spec.Child("generateType"), r.Spec.GenerateType,
+			"generateType is immutable: changing it requires a machine rollout"))
+	}
+
+	if r.Spec.TalosVersion != old.Spec.TalosVersion {
+		allErrs = append(allErrs, field.Invalid(spec.Child("talosVersion"), r.Spec.TalosVersion,
+			"talosVersion is immutable: changing it requires a machine rollout"))
+	}
+
+	if r.Spec.Hostname.Source != old.Spec.Hostname.Source {
+		allErrs = append(allErrs, field.Invalid(spec.Child("hostname").Child("source"), r.Spec.Hostname.Source,
+			"hostname is immutable: changing it requires a machine rollout"))
+	}
+
+	if len(allErrs) == 0 {
+		return nil
+	}
+
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: GroupVersion.Group, Kind: "TalosConfig"},
+		r.Name, allErrs)
 }
 
 func (r *TalosConfig) validate() error {

@@ -14,29 +14,42 @@ const (
 	ConfigFinalizer = "talosconfig.bootstrap.cluster.x-k8s.io"
 )
 
-// TalosConfigSpec defines the desired state of TalosConfig
+// TalosConfigSpec defines the desired state of TalosConfig.
+//
+// Some fields can be changed in place on an existing Machine; changing any other field requires a
+// Machine rollout.
 type TalosConfigSpec struct {
+	// Immutable fields: changing any of these requires a Machine rollout.
+
 	// Version of Talos to generate machine configuration for, i.e. v1.0 (patch version may be omitted).
 	// Defaults to the latest supported version if unspecified.
 	// It is recommended to set this field explicitly to avoid unexpected issues during provider upgrades.
+	// Immutable: changing the Talos version requires a Machine rollout.
 	TalosVersion string `json:"talosVersion,omitempty"`
 
 	// Talos machine configuration type to generate: Supported values are:
 	// controlplane, worker, init (deprecated), none (configuration must be then provided in data field).
+	// Immutable: changing it requires a Machine rollout.
 	// +kubebuilder:validation:Enum=controlplane;worker;init;none
 	GenerateType string `json:"generateType"`
 
+	// Set hostname in the machine configuration to some value.
+	// Immutable: the hostname is part of the Machine identity, changing it requires a Machine rollout.
+	Hostname HostnameSpec `json:"hostname,omitempty"`
+
+	// Mutable fields: changes to these fields are applied in place to the Machine configuration.
+
 	// Machine configuration in case generateType=none.
+	// Mutable: applied in place to the Machine configuration.
 	Data string `json:"data,omitempty"`
 
 	// RFC6902 JSON patches to apply to machine configuration.
+	// Mutable: applied in place to the Machine configuration.
 	ConfigPatches []ConfigPatches `json:"configPatches,omitempty"`
 
 	// Talos Linux machine configuration strategic merge patch list.
+	// Mutable: applied in place to the Machine configuration.
 	StrategicPatches []string `json:"strategicPatches,omitempty"`
-
-	// Set hostname in the machine configuration to some value.
-	Hostname HostnameSpec `json:"hostname,omitempty"`
 	// Important: Run "make" to regenerate code after modifying this file
 }
 

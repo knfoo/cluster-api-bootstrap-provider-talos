@@ -316,6 +316,16 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
+	// In-place updates: while the update extension is updating the Machine in place, the bootstrap
+	// provider must not regenerate the bootstrap data for the changed TalosConfig
+	// (CAPI bootstrap contract, bootstrap-config.md:364-365). The trigger that sets this annotation
+	// on the bootstrap config is KCP's triggerInPlaceUpdate (inplace_trigger.go:108-111).
+	if _, inPlaceUpdate := config.GetAnnotations()[capiv1.UpdateInProgressAnnotation]; inPlaceUpdate {
+		log.Info("TalosConfig is being updated in place, not regenerating the bootstrap data")
+
+		return ctrl.Result{}, nil
+	}
+
 	if err = r.reconcileGenerate(ctx, tcScope); err != nil {
 		v1beta1conditions.MarkFalse(
 			config,
