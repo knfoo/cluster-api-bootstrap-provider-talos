@@ -24,7 +24,57 @@ type TalosConfigSpec struct {
 	StrategicPatches []string `json:"strategicPatches,omitempty"`
 	// Set hostname in the machine configuration to some value.
 	Hostname HostnameSpec `json:"hostname,omitempty"`
+
+	// MetadataFrom specifies where to read infrastructure metadata for template
+	// processing. When set, StrategicPatches are rendered through Go's
+	// text/template engine. Supports flat key:value, YAML, or JSON formats.
+	// +optional
+	MetadataFrom *MetadataFrom `json:"metadataFrom,omitempty"`
+
+	// DataSecretKey overrides the key name in the bootstrap data secret.
+	// Defaults to "value". Set to "userData" for Metal3/BMH compatibility.
+	// +optional
+	DataSecretKey string `json:"dataSecretKey,omitempty"`
+
+	// TemplateVariables are inline key-value pairs merged into the template
+	// context alongside metadata from MetadataFrom.
+	// +optional
+	TemplateVariables map[string]string `json:"templateVariables,omitempty"`
+
 	// Important: Run "make" to regenerate code after modifying this file
+}
+
+// MetadataFrom specifies where to read infrastructure metadata.
+type MetadataFrom struct {
+	// SecretRef references a specific secret containing metadata.
+	// +optional
+	SecretRef *MetadataSecretRef `json:"secretRef,omitempty"`
+
+	// InfrastructureMachine derives the metadata secret name from the
+	// infrastructure machine reference (Machine.Spec.InfrastructureRef.Name).
+	// +optional
+	InfrastructureMachine *InfrastructureMachineMetadata `json:"infrastructureMachine,omitempty"`
+}
+
+// MetadataSecretRef references a secret containing metadata key:value pairs.
+type MetadataSecretRef struct {
+	// Name of the secret in the same namespace as the TalosConfig.
+	Name string `json:"name"`
+	// Key within the secret data containing the metadata. Default: "metaData".
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// InfrastructureMachineMetadata configures metadata discovery from
+// the infrastructure machine's metadata secret.
+type InfrastructureMachineMetadata struct {
+	// SecretNameSuffix is appended to the infrastructure machine name
+	// to form the metadata secret name. Default: "-metadata".
+	// +optional
+	SecretNameSuffix string `json:"secretNameSuffix,omitempty"`
+	// DataKey is the key within the secret data. Default: "metaData".
+	// +optional
+	DataKey string `json:"dataKey,omitempty"`
 }
 
 // HostnameSource is the definition of hostname source.
@@ -75,6 +125,12 @@ type TalosConfigStatus struct {
 	//
 	// +optional
 	FailureMessage string `json:"failureMessage,omitempty"`
+
+	// TemplatePatchesPending indicates bootstrap data was created without
+	// template patches because metadata was not yet available. The controller
+	// will re-reconcile and update the secret once metadata appears.
+	// +optional
+	TemplatePatchesPending *bool `json:"templatePatchesPending,omitempty"`
 
 	// ObservedGeneration is the latest generation observed by the controller.
 	// +optional

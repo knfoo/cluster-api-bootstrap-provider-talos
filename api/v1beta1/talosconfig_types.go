@@ -50,7 +50,69 @@ type TalosConfigSpec struct {
 	// Talos Linux machine configuration strategic merge patch list.
 	// Mutable: applied in place to the Machine configuration.
 	StrategicPatches []string `json:"strategicPatches,omitempty"`
+
+	// MetadataFrom specifies where to read infrastructure metadata for template
+	// processing. The metadata secret may contain flat key:value pairs, YAML, or
+	// JSON — nested structures are flattened to dot-notation keys automatically.
+	// When set, StrategicPatches are rendered through Go's text/template engine
+	// with functions: get(key), has(key), default(fallback, value),
+	// required(errMsg, value). Plain strings without template syntax pass through
+	// unchanged.
+	// Mutable: applied in place to the Machine configuration.
+	// +optional
+	MetadataFrom *MetadataFrom `json:"metadataFrom,omitempty"`
+
+	// DataSecretKey overrides the key name in the bootstrap data secret.
+	// Defaults to "value". Set to "userData" for Metal3/BMH compatibility.
+	// Mutable: applied in place to the Machine configuration.
+	// +optional
+	DataSecretKey string `json:"dataSecretKey,omitempty"`
+
+	// TemplateVariables are inline key-value pairs merged into the template
+	// context alongside metadata from MetadataFrom. These are available in
+	// StrategicPatches via {{get "key"}} or {{.key}}.
+	// Template variables take precedence over metadata values for the same key.
+	// Mutable: applied in place to the Machine configuration.
+	// +optional
+	TemplateVariables map[string]string `json:"templateVariables,omitempty"`
+
 	// Important: Run "make" to regenerate code after modifying this file
+}
+
+// MetadataFrom specifies where to read infrastructure metadata.
+type MetadataFrom struct {
+	// SecretRef references a specific secret containing metadata.
+	// +optional
+	SecretRef *MetadataSecretRef `json:"secretRef,omitempty"`
+
+	// InfrastructureMachine derives the metadata secret name from the
+	// infrastructure machine reference (Machine.Spec.InfrastructureRef.Name).
+	// +optional
+	InfrastructureMachine *InfrastructureMachineMetadata `json:"infrastructureMachine,omitempty"`
+}
+
+// MetadataSecretRef references a secret containing metadata key:value pairs.
+type MetadataSecretRef struct {
+	// Name of the secret in the same namespace as the TalosConfig.
+	Name string `json:"name"`
+	// Key within the secret data containing the metadata. Default: "metaData".
+	// +optional
+	// +kubebuilder:default="metaData"
+	Key string `json:"key,omitempty"`
+}
+
+// InfrastructureMachineMetadata configures metadata discovery from
+// the infrastructure machine's metadata secret.
+type InfrastructureMachineMetadata struct {
+	// SecretNameSuffix is appended to the infrastructure machine name
+	// to form the metadata secret name. Default: "-metadata".
+	// +optional
+	// +kubebuilder:default="-metadata"
+	SecretNameSuffix string `json:"secretNameSuffix,omitempty"`
+	// DataKey is the key within the secret data. Default: "metaData".
+	// +optional
+	// +kubebuilder:default="metaData"
+	DataKey string `json:"dataKey,omitempty"`
 }
 
 // HostnameSource is the definition of hostname source.
@@ -84,6 +146,12 @@ type TalosConfigStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	DataSecretName string `json:"dataSecretName,omitempty"`
+
+	// templatePatchesPending indicates bootstrap data was created without
+	// template patches because metadata was not yet available. The controller
+	// will re-reconcile and update the secret once metadata appears.
+	// +optional
+	TemplatePatchesPending *bool `json:"templatePatchesPending,omitempty"`
 
 	// ObservedGeneration is the latest generation observed by the controller.
 	// +optional

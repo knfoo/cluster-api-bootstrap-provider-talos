@@ -177,3 +177,122 @@ func TestTalosConfigValidateUpdateRejectsAnySpecChangeWhenGateDisabled(t *testin
 		assert.True(t, apierrors.IsBadRequest(err), "expected a bad request error for a change to %s while the gate is off", name)
 	}
 }
+
+// metadataFrom describes where the template metadata comes from, and it can point at
+// only one source; both sources set is rejected on create and update instead of at
+// reconcile time.
+func TestTalosConfigValidateRejectsMetadataFromWithBothSources(t *testing.T) {
+	spec := baseSpec()
+	spec.MetadataFrom = &MetadataFrom{
+		SecretRef: &MetadataSecretRef{Name: "node-metadata"},
+		InfrastructureMachine: &InfrastructureMachineMetadata{
+			SecretNameSuffix: "-metadata",
+		},
+	}
+
+	obj := talosConfigWith(spec)
+
+	_, err := obj.ValidateCreate(context.Background(), obj)
+	assert.Error(t, err, "expected metadataFrom with both secretRef and infrastructureMachine to be rejected")
+	assert.Contains(t, err.Error(), "metadataFrom must specify either secretRef or infrastructureMachine", "expected the metadataFrom guard to reject both sources")
+	assert.True(t, apierrors.IsInvalid(err), "expected an invalid-object error for metadataFrom with both sources")
+
+	_, err = obj.ValidateUpdate(updateContext(), obj, obj)
+	assert.Error(t, err, "expected metadataFrom with both secretRef and infrastructureMachine to be rejected on update")
+	assert.Contains(t, err.Error(), "metadataFrom must specify either secretRef or infrastructureMachine", "expected the metadataFrom guard to reject both sources")
+}
+
+func TestTalosConfigValidateAcceptsMetadataFromWithOneSource(t *testing.T) {
+	cases := map[string]*MetadataFrom{
+		"secretRef":               {SecretRef: &MetadataSecretRef{Name: "node-metadata", Key: "metaData"}},
+		"infrastructureMachine":   {InfrastructureMachine: &InfrastructureMachineMetadata{SecretNameSuffix: "-metadata", DataKey: "metaData"}},
+		"no metadataFrom (plain)": nil,
+	}
+
+	for name, metadataFrom := range cases {
+		spec := baseSpec()
+		spec.MetadataFrom = metadataFrom
+		spec.TemplateVariables = map[string]string{"disk": "nvme0"}
+		spec.DataSecretKey = "userData"
+
+		obj := talosConfigWith(spec)
+
+		_, err := obj.ValidateCreate(context.Background(), obj)
+		assert.NoError(t, err, "expected metadataFrom with one source (%s) to be accepted", name)
+	}
+}
+
+// Template rendering fields are mutable: with the InPlaceUpdates gate enabled a change to
+// metadataFrom, templateVariables or dataSecretKey is accepted, like a change to the
+// patches themselves.
+func TestTalosConfigValidateUpdateAllowsTemplateRenderingFields(t *testing.T) {
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.InPlaceUpdates, true)
+
+	old := talosConfigWith(baseSpec())
+
+	cases := map[string]TalosConfigSpec{
+		"metadataFrom": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.MetadataFrom = &MetadataFrom{SecretRef: &MetadataSecretRef{Name: "node-metadata"}}
+			return spec
+		}(),
+		"templateVariables": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.TemplateVariables = map[string]string{"disk": "nvme0"}
+			return spec
+		}(),
+		"dataSecretKey": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.DataSecretKey = "userData"
+			return spec
+		}(),
+		"strategicPatches with templates": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.StrategicPatches = []string{`- network: hostname: {{ get "hostname" }}`}
+			return spec
+		}(),
+	}
+
+	for name, spec := range cases {
+		newObj := talosConfigWith(spec)
+
+		_, err := newObj.ValidateUpdate(updateContext(), old, newObj)
+
+		assert.NoError(t, err, "expected a change to %s to be accepted", name)
+	}
+}
+
+// Without the gate the whole spec stays immutable, so the rendering fields are rejected too.
+func TestTalosConfigValidateUpdateRejectsTemplateRenderingFieldsWhenGateDisabled(t *testing.T) {
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.InPlaceUpdates, false)
+
+	old := talosConfigWith(baseSpec())
+
+	cases := map[string]TalosConfigSpec{
+		"metadataFrom": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.MetadataFrom = &MetadataFrom{SecretRef: &MetadataSecretRef{Name: "node-metadata"}}
+			return spec
+		}(),
+		"templateVariables": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.TemplateVariables = map[string]string{"disk": "nvme0"}
+			return spec
+		}(),
+		"dataSecretKey": func() TalosConfigSpec {
+			spec := baseSpec()
+			spec.DataSecretKey = "userData"
+			return spec
+		}(),
+	}
+
+	for name, spec := range cases {
+		newObj := talosConfigWith(spec)
+
+		_, err := newObj.ValidateUpdate(updateContext(), old, newObj)
+
+		assert.Error(t, err, "expected a change to %s to be rejected while the gate is off", name)
+		assert.Contains(t, err.Error(), "immutable", "expected the immutable guard to reject a change to %s while the gate is off", name)
+		assert.True(t, apierrors.IsBadRequest(err), "expected a bad request error for a change to %s while the gate is off", name)
+	}
+}

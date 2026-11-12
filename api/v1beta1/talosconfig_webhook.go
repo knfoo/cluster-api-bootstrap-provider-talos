@@ -121,6 +121,16 @@ func (r *TalosConfig) validate() error {
 		)
 	}
 
+	// metadataFrom can point at only one metadata source. The same rule is enforced
+	// when the reconciler resolves the metadata (controllers/talosconfig_controller.go),
+	// so rejecting it here fails bad specs at admission instead of at reconcile.
+	if r.Spec.MetadataFrom != nil && r.Spec.MetadataFrom.SecretRef != nil && r.Spec.MetadataFrom.InfrastructureMachine != nil {
+		allErrs = append(allErrs,
+			field.Invalid(field.NewPath("spec").Child("metadataFrom"), r.Spec.MetadataFrom,
+				"metadataFrom must specify either secretRef or infrastructureMachine, not both"),
+		)
+	}
+
 	if len(allErrs) == 0 {
 		return nil
 	}
