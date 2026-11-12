@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/go-logr/logr"
@@ -26,6 +27,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,9 +45,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	bootstrapv1beta1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1beta1"
+	"github.com/siderolabs/cluster-api-bootstrap-provider-talos/pkg/templatepatch"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -105,12 +110,72 @@ func (r *TalosConfigReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 		),
 	)
 
+	// Watch Secrets so that Phase 2 (rendering the strategic patches that read
+	// infrastructure metadata) starts as soon as the metadata secret appears,
+	// instead of waiting for the fallback requeue. Metal3/CAPM3 creates the
+	// Metal3DataClaim - and therefore the metadata secret - only after the
+	// bootstrap config is ready, so this watch is what wins that race.
+	// Ported from cabpt-b7fbe6a-template-rendering.patch:1090-1104.
+	b = b.Watches(
+		&corev1.Secret{},
+		handler.EnqueueRequestsFromMapFunc(r.MetadataSecretToTalosConfigs),
+		builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(_ event.CreateEvent) bool { return true },
+			UpdateFunc:  func(_ event.UpdateEvent) bool { return true },
+			DeleteFunc:  func(_ event.DeleteEvent) bool { return false },
+			GenericFunc: func(_ event.GenericEvent) bool { return false },
+		}),
+	)
+
 	if err := b.Complete(r); err != nil {
 		return fmt.Errorf("failed setting up with a controller manager: %w", err)
 	}
 
 	return nil
 
+}
+
+// MetadataSecretToTalosConfigs maps a metadata Secret to the TalosConfigs that may
+// need Phase 2 reconciliation. Ported from
+// cabpt-b7fbe6a-template-rendering.patch:1140-1181.
+func (r *TalosConfigReconciler) MetadataSecretToTalosConfigs(ctx context.Context, o client.Object) []ctrl.Request {
+	secret, ok := o.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	// Only secrets that look like infrastructure metadata secrets (Metal3Data /
+	// CAPM3 Metal3DataTemplate metadata) can trigger Phase 2.
+	if secret.Type != "" && secret.Type != "infrastructure.cluster.x-k8s.io/secret" && secret.Type != "Opaque" {
+		return nil
+	}
+
+	if !strings.HasSuffix(secret.Name, "-metadata") {
+		return nil
+	}
+
+	talosConfigList := &bootstrapv1beta1.TalosConfigList{}
+	if err := r.Client.List(ctx, talosConfigList, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+
+	var requests []ctrl.Request
+	for _, talosConfig := range talosConfigList.Items {
+		if talosConfig.Spec.MetadataFrom == nil {
+			continue
+		}
+
+		// Enqueue configs with pending template patches, and configs whose bootstrap
+		// secret was created without the configured dataSecretKey (self-healing).
+		if ptr.Deref(talosConfig.Status.TemplatePatchesPending, false) ||
+			(ptr.Deref(talosConfig.Status.Initialization.DataSecretCreated, false) && talosConfig.Spec.DataSecretKey != "") {
+			requests = append(requests, ctrl.Request{
+				NamespacedName: client.ObjectKeyFromObject(&talosConfig),
+			})
+		}
+	}
+
+	return requests
 }
 
 // +kubebuilder:rbac:groups=bootstrap.cluster.x-k8s.io,resources=talosconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -239,44 +304,68 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Cluster:     cluster,
 	}
 
-	// bail super early if it's already ready
+	// bail super early if it's already ready, unless template patches are still pending.
+	// Ported from cabpt-b7fbe6a-template-rendering.patch:1131-1221.
 	if ptr.Deref(config.Status.Initialization.DataSecretCreated, false) {
-		log.Info("ignoring an already ready config")
-		v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
-		conditions.Set(config, metav1.Condition{
-			Type:   bootstrapv1beta1.DataSecretAvailableCondition,
-			Reason: bootstrapv1beta1.DataSecretAvailableReason,
-			Status: metav1.ConditionTrue,
-		})
+		needsPhase2 := ptr.Deref(config.Status.TemplatePatchesPending, false)
 
-		// reconcile cluster-wide talosconfig
-		err = r.reconcileClientConfig(ctx, log, tcScope)
-
-		if err == nil {
-			v1beta1conditions.MarkTrue(config, bootstrapv1beta1.ClientConfigAvailableV1Beta1Condition)
-			conditions.Set(config, metav1.Condition{
-				Type:   bootstrapv1beta1.ClientConfigAvailableCondition,
-				Reason: bootstrapv1beta1.ClientConfigAvailableReason,
-				Status: metav1.ConditionTrue,
-			})
-		} else {
-			v1beta1conditions.MarkFalse(
-				config,
-				bootstrapv1beta1.ClientConfigAvailableV1Beta1Condition,
-				bootstrapv1beta1.ClientConfigGenerationFailedV1Beta1Reason,
-				capiv1.ConditionSeverityError,
-				"talosconfig generation failure: %s",
-				err.Error(),
-			)
-			conditions.Set(config, metav1.Condition{
-				Type:    bootstrapv1beta1.ClientConfigAvailableCondition,
-				Status:  metav1.ConditionFalse,
-				Reason:  bootstrapv1beta1.ClientConfigAvailableInternalErrorReason,
-				Message: fmt.Sprintf("talosconfig generation failure: %s", err),
-			})
+		// Self-healing: templatePatchesPending may have been dropped (for example by
+		// a CRD that does not yet carry the field, or a status restore). If the
+		// bootstrap secret does not have the configured dataSecretKey, Phase 2 never
+		// ran and the config is not actually ready.
+		if !needsPhase2 && config.Spec.MetadataFrom != nil && config.Spec.DataSecretKey != "" {
+			if secretName := config.Status.DataSecretName; secretName != "" {
+				if secret, fetchErr := r.fetchSecret(ctx, config, secretName); fetchErr == nil {
+					if _, hasKey := secret.Data[config.Spec.DataSecretKey]; !hasKey {
+						log.Info("bootstrap secret is missing the configured dataSecretKey, re-running template rendering", "key", config.Spec.DataSecretKey)
+						needsPhase2 = true
+					}
+				}
+			}
 		}
 
-		return ctrl.Result{}, err
+		if !needsPhase2 {
+			log.Info("ignoring an already ready config")
+			v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
+			conditions.Set(config, metav1.Condition{
+				Type:   bootstrapv1beta1.DataSecretAvailableCondition,
+				Reason: bootstrapv1beta1.DataSecretAvailableReason,
+				Status: metav1.ConditionTrue,
+			})
+
+			// reconcile cluster-wide talosconfig
+			err = r.reconcileClientConfig(ctx, log, tcScope)
+
+			if err == nil {
+				v1beta1conditions.MarkTrue(config, bootstrapv1beta1.ClientConfigAvailableV1Beta1Condition)
+				conditions.Set(config, metav1.Condition{
+					Type:   bootstrapv1beta1.ClientConfigAvailableCondition,
+					Reason: bootstrapv1beta1.ClientConfigAvailableReason,
+					Status: metav1.ConditionTrue,
+				})
+			} else {
+				v1beta1conditions.MarkFalse(
+					config,
+					bootstrapv1beta1.ClientConfigAvailableV1Beta1Condition,
+					bootstrapv1beta1.ClientConfigGenerationFailedV1Beta1Reason,
+					capiv1.ConditionSeverityError,
+					"talosconfig generation failure: %s",
+					err.Error(),
+				)
+				conditions.Set(config, metav1.Condition{
+					Type:    bootstrapv1beta1.ClientConfigAvailableCondition,
+					Status:  metav1.ConditionFalse,
+					Reason:  bootstrapv1beta1.ClientConfigAvailableInternalErrorReason,
+					Message: fmt.Sprintf("talosconfig generation failure: %s", err),
+				})
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		// Template patches are pending: re-reconcile so they can be applied now
+		// that the metadata may be available.
+		log.Info("re-reconciling to apply pending template patches")
 	}
 
 	// Wait patiently for the infrastructure to be ready
@@ -326,7 +415,8 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	if err = r.reconcileGenerate(ctx, tcScope); err != nil {
+	metadataPending, err := r.reconcileGenerate(ctx, tcScope)
+	if err != nil {
 		v1beta1conditions.MarkFalse(
 			config,
 			bootstrapv1beta1.DataSecretAvailableV1Beta1Condition,
@@ -347,6 +437,29 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	config.Status.Initialization.DataSecretCreated = ptr.To(true)
 
+	if metadataPending {
+		// Phase 1: the bootstrap secret exists (so the Machine becomes bootstrap
+		// ready and the infrastructure provider can progress), but the patches that
+		// read metadata are not rendered yet. Requeue as a safety net; the Secret
+		// watch normally triggers Phase 2 as soon as the metadata secret appears.
+		config.Status.TemplatePatchesPending = ptr.To(true)
+
+		v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
+		conditions.Set(config, metav1.Condition{
+			Type:   bootstrapv1beta1.DataSecretAvailableCondition,
+			Reason: bootstrapv1beta1.DataSecretAvailableReason,
+			Status: metav1.ConditionTrue,
+		})
+
+		log.Info("metadata not yet available, bootstrap secret created without the rendered template patches (Phase 1)")
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Phase 2 complete, or single phase: metadataFrom is unset or the metadata is
+	// available, so every strategic patch is applied.
+	config.Status.TemplatePatchesPending = ptr.To(false)
+
 	v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
 	conditions.Set(config, metav1.Condition{
 		Type:   bootstrapv1beta1.DataSecretAvailableCondition,
@@ -357,7 +470,12 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *TalosConfigScope) error {
+// reconcileGenerate generates the Talos machine configuration and writes the
+// bootstrap data secret. It returns metadataPending=true when metadataFrom is
+// configured but the metadata secret does not exist yet: in that case the
+// bootstrap data is written without the template patches (Phase 1) and the
+// caller requeues so Phase 2 can render them once the metadata appears.
+func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *TalosConfigScope) (metadataPending bool, retErr error) {
 	var (
 		retData *TalosConfigBundle
 		err     error
@@ -373,23 +491,23 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 	// Slurp and use user-supplied configs
 	case config.Spec.GenerateType == "none":
 		if config.Spec.Data == "" {
-			return errors.New("failed to specify config data with none generate type")
+			return false, errors.New("failed to specify config data with none generate type")
 		}
 
 		retData, err = r.userConfigs(ctx, tcScope)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 	// Generate configs on the fly
 	case machineType != machine.TypeUnknown:
 		retData, multiConfigPatches, err = r.genConfigs(ctx, tcScope)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 	default:
-		return fmt.Errorf("unknown generate type specified: %q", config.Spec.GenerateType)
+		return false, fmt.Errorf("unknown generate type specified: %q", config.Spec.GenerateType)
 	}
 
 	// Handle JSON6902 patches to the machine config if they were specified
@@ -397,30 +515,97 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 	if len(config.Spec.ConfigPatches) > 0 {
 		marshalledPatches, err := json.Marshal(config.Spec.ConfigPatches)
 		if err != nil {
-			return fmt.Errorf("failure marshalling config patches: %s", err)
+			return false, fmt.Errorf("failure marshalling config patches: %w", err)
 		}
 
 		patch, err := jsonpatch.DecodePatch(marshalledPatches)
 		if err != nil {
-			return fmt.Errorf("failure decoding config patches from talosconfig to rfc6902 patch: %s", err)
+			return false, fmt.Errorf("failure decoding config patches from talosconfig to rfc6902 patch: %w", err)
 		}
 
 		patchedBytes, err := configpatcher.JSON6902([]byte(retData.BootstrapData), patch)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		retData.BootstrapData = string(patchedBytes)
 	}
 
-	// Handle strategic merge patches.
-	if strategicPatches := slices.AppendSeq(config.Spec.StrategicPatches, slices.Values(multiConfigPatches)); len(strategicPatches) > 0 {
+	// Build the template context from metadata secrets, inline template variables
+	// and machine context. Ported from
+	// cabpt-b7fbe6a-template-rendering.patch:1331-1390.
+	var metadata map[string]string
+
+	hasMetadata := config.Spec.MetadataFrom != nil
+	hasVariables := len(config.Spec.TemplateVariables) > 0
+
+	if hasMetadata || hasVariables {
+		if hasMetadata {
+			metadata, err = r.resolveMetadata(ctx, tcScope)
+			if err != nil {
+				if isMetadataNotYetAvailable(err) {
+					// Two-phase bootstrap: the infrastructure provider (Metal3/CAPM3)
+					// creates the metadata claim only after the bootstrap config is
+					// ready, so the metadata secret cannot exist yet. Write the
+					// bootstrap secret without the rendered patches (Phase 1) and let
+					// the metadata secret trigger Phase 2.
+					metadataPending = true
+					metadata = nil
+				} else {
+					return false, fmt.Errorf("resolving metadata: %w", err)
+				}
+			}
+		}
+
+		if !metadataPending {
+			if metadata == nil {
+				metadata = make(map[string]string)
+			}
+
+			// Inline template variables take precedence over metadata values.
+			templatepatch.MergeVariables(metadata, config.Spec.TemplateVariables)
+
+			// Machine context, so patches can use {{ get "machine.name" }} and
+			// {{ get "machine.infrastructureRef.name" }}.
+			if !tcScope.ConfigOwner.IsMachinePool() {
+				machine := &capiv1.Machine{}
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, machine); err != nil {
+					r.Log.Info("could not extract Machine from config owner for the template context, machine.* keys are unavailable", "error", err)
+				} else {
+					templatepatch.EnrichWithMachine(metadata, machine.Name, machine.Spec.InfrastructureRef.Name)
+				}
+			}
+		}
+	}
+
+	// Handle strategic merge patches: user patches plus the standard patches from
+	// the generator, rendered through the template engine when a context exists.
+	// Plain strings without template syntax pass through unchanged.
+	strategicPatches := slices.AppendSeq(config.Spec.StrategicPatches, slices.Values(multiConfigPatches))
+
+	if metadata != nil && len(strategicPatches) > 0 {
+		rendered, err := templatepatch.ProcessTemplates(strategicPatches, metadata)
+		if err != nil {
+			return false, fmt.Errorf("rendering strategicPatches templates: %w", err)
+		}
+
+		strategicPatches = rendered
+	}
+
+	if len(strategicPatches) > 0 {
 		patches := make([]configpatcher.Patch, 0, len(strategicPatches))
 
 		for _, strategicPatch := range strategicPatches {
+			// Phase 1 skips patches that still contain unrendered template
+			// expressions: they are not valid YAML. They are applied in Phase 2.
+			// Ported from cabpt-b7fbe6a-template-rendering.patch:1396-1401.
+			if metadataPending && strings.Contains(strategicPatch, "{{") {
+				continue
+			}
+
 			patch, err := configpatcher.LoadPatch([]byte(strategicPatch))
 			if err != nil {
-				return fmt.Errorf("failure loading StrategicPatch: %w", err)
+				return false, fmt.Errorf("failure loading StrategicPatch: %w", err)
 			}
 
 			patches = append(patches, patch)
@@ -428,17 +613,17 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 
 		out, err := configpatcher.Apply(configpatcher.WithBytes([]byte(retData.BootstrapData)), patches)
 		if err != nil {
-			return fmt.Errorf("failure applying StrategicPatches: %w", err)
+			return false, fmt.Errorf("failure applying StrategicPatches: %w", err)
 		}
 
 		outCfg, err := out.Config()
 		if err != nil {
-			return fmt.Errorf("failure converting result to bytes: %w", err)
+			return false, fmt.Errorf("failure converting result to bytes: %w", err)
 		}
 
 		retData.BootstrapData, err = outCfg.EncodeString(encoder.WithComments(encoder.CommentsDisabled))
 		if err != nil {
-			return fmt.Errorf("failure converting config to string: %w", err)
+			return false, fmt.Errorf("failure converting config to string: %w", err)
 		}
 	}
 
@@ -447,7 +632,7 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 	if tcScope.ConfigOwner.IsMachinePool() {
 		mp := &capiv1.MachinePool{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, mp); err != nil {
-			return err
+			return false, err
 		}
 
 		if mp.Spec.Template.Spec.InfrastructureRef.Kind == "PacketMachinePool" {
@@ -456,7 +641,7 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 	} else {
 		machine := &capiv1.Machine{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, machine); err != nil {
-			return err
+			return false, err
 		}
 
 		if machine.Spec.InfrastructureRef.Kind == "PacketMachine" {
@@ -466,20 +651,109 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 
 	var dataSecretName string
 
-	dataSecretName, err = r.writeBootstrapData(ctx, tcScope, []byte(retData.BootstrapData))
+	dataSecretName, err = r.writeBootstrapData(ctx, tcScope, []byte(retData.BootstrapData), metadataPending)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	config.Status.DataSecretName = dataSecretName
 
-	return nil
+	return metadataPending, nil
 }
 
 func (r *TalosConfigReconciler) reconcileDelete(config *bootstrapv1beta1.TalosConfig) (ctrl.Result, error) {
 	controllerutil.RemoveFinalizer(config, bootstrapv1beta1.ConfigFinalizer)
 
 	return ctrl.Result{}, nil
+}
+
+// isMetadataNotYetAvailable reports whether the error means the metadata secret
+// does not exist yet — a transient state that clears once the infrastructure
+// provider (Metal3/CAPM3) creates its metadata claim.
+func isMetadataNotYetAvailable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not yet available")
+}
+
+// resolveMetadata reads infrastructure metadata from the configured source and
+// enriches it with cluster data. Returns nil when metadataFrom is not set.
+// Ported from cabpt-b7fbe6a-template-rendering.patch:1480-1556.
+func (r *TalosConfigReconciler) resolveMetadata(ctx context.Context, scope *TalosConfigScope) (map[string]string, error) {
+	config := scope.Config
+
+	if config.Spec.MetadataFrom == nil {
+		return nil, nil
+	}
+
+	var (
+		secretName string
+		dataKey    string
+	)
+
+	if config.Spec.MetadataFrom.SecretRef != nil && config.Spec.MetadataFrom.InfrastructureMachine != nil {
+		return nil, fmt.Errorf("metadataFrom must specify either secretRef or infrastructureMachine, not both")
+	}
+
+	switch {
+	case config.Spec.MetadataFrom.SecretRef != nil:
+		secretName = config.Spec.MetadataFrom.SecretRef.Name
+		if secretName == "" {
+			return nil, fmt.Errorf("metadataFrom.secretRef.name must not be empty")
+		}
+
+		dataKey = config.Spec.MetadataFrom.SecretRef.Key
+		if dataKey == "" {
+			dataKey = "metaData"
+		}
+
+	case config.Spec.MetadataFrom.InfrastructureMachine != nil:
+		infraMeta := config.Spec.MetadataFrom.InfrastructureMachine
+
+		suffix := infraMeta.SecretNameSuffix
+		if suffix == "" {
+			suffix = "-metadata"
+		}
+
+		dataKey = infraMeta.DataKey
+		if dataKey == "" {
+			dataKey = "metaData"
+		}
+
+		// The metadata secret is named after the infrastructure machine, matching
+		// the Metal3DataTemplate metadata secret of CAPM3.
+		machine := &capiv1.Machine{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(scope.ConfigOwner.Object, machine); err != nil {
+			return nil, fmt.Errorf("failed to convert config owner to Machine: %w", err)
+		}
+
+		infraName := machine.Spec.InfrastructureRef.Name
+		if infraName == "" {
+			return nil, fmt.Errorf("machine %s has no infrastructure reference name", machine.Name)
+		}
+
+		secretName = infraName + suffix
+
+	default:
+		return nil, fmt.Errorf("metadataFrom must specify either secretRef or infrastructureMachine")
+	}
+
+	secret, err := r.fetchSecret(ctx, config, secretName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("metadata secret %q not yet available: %w", secretName, err)
+		}
+
+		return nil, fmt.Errorf("failed to fetch metadata secret %q: %w", secretName, err)
+	}
+
+	raw, ok := secret.Data[dataKey]
+	if !ok {
+		return nil, fmt.Errorf("metadata secret %q does not contain key %q", secretName, dataKey)
+	}
+
+	metadata := templatepatch.ParseMetadata(raw)
+	templatepatch.EnrichWithCluster(metadata, scope.Cluster)
+
+	return metadata, nil
 }
 
 func genTalosConfigFile(clusterName string, bundle *secrets.Bundle, endpoints []string) (string, error) {
