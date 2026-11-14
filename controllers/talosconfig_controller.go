@@ -6,24 +6,19 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/go-logr/logr"
 	"github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
-	"github.com/siderolabs/talos/pkg/machinery/config/configpatcher"
 	"github.com/siderolabs/talos/pkg/machinery/config/encoder"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
-	"github.com/siderolabs/talos/pkg/machinery/config/generate/stdpatches"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"gopkg.in/yaml.v3"
@@ -50,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	bootstrapv1beta1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1beta1"
+	"github.com/siderolabs/cluster-api-bootstrap-provider-talos/pkg/machineconfig"
 	"github.com/siderolabs/cluster-api-bootstrap-provider-talos/pkg/templatepatch"
 	// +kubebuilder:scaffold:imports
 )
@@ -477,15 +473,14 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // caller requeues so Phase 2 can render them once the metadata appears.
 func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *TalosConfigScope) (metadataPending bool, retErr error) {
 	var (
-		retData *TalosConfigBundle
-		err     error
+		bootstrapData string
+		stdPatches    []string
+		err           error
 	)
 
 	config := tcScope.Config
 
 	machineType, _ := machine.ParseType(config.Spec.GenerateType) //nolint:errcheck // handle errors later
-
-	multiConfigPatches := []string{}
 
 	switch {
 	// Slurp and use user-supplied configs
@@ -494,41 +489,24 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 			return false, errors.New("failed to specify config data with none generate type")
 		}
 
-		retData, err = r.userConfigs(ctx, tcScope)
+		userBundle, err := r.userConfigs(ctx, tcScope)
 		if err != nil {
 			return false, err
 		}
 
-	// Generate configs on the fly
+		bootstrapData = userBundle.BootstrapData
+
+	// Generate configs on the fly. The generation itself lives in
+	// pkg/machineconfig so the bootstrap controller and the in-place update
+	// extension share one implementation.
 	case machineType != machine.TypeUnknown:
-		retData, multiConfigPatches, err = r.genConfigs(ctx, tcScope)
+		bootstrapData, stdPatches, err = r.generateConfigs(ctx, tcScope)
 		if err != nil {
 			return false, err
 		}
 
 	default:
 		return false, fmt.Errorf("unknown generate type specified: %q", config.Spec.GenerateType)
-	}
-
-	// Handle JSON6902 patches to the machine config if they were specified
-	// Note this will patch both pre-generated and user-provided configs.
-	if len(config.Spec.ConfigPatches) > 0 {
-		marshalledPatches, err := json.Marshal(config.Spec.ConfigPatches)
-		if err != nil {
-			return false, fmt.Errorf("failure marshalling config patches: %w", err)
-		}
-
-		patch, err := jsonpatch.DecodePatch(marshalledPatches)
-		if err != nil {
-			return false, fmt.Errorf("failure decoding config patches from talosconfig to rfc6902 patch: %w", err)
-		}
-
-		patchedBytes, err := configpatcher.JSON6902([]byte(retData.BootstrapData), patch)
-		if err != nil {
-			return false, err
-		}
-
-		retData.BootstrapData = string(patchedBytes)
 	}
 
 	// Build the template context from metadata secrets, inline template variables
@@ -578,53 +556,19 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 		}
 	}
 
-	// Handle strategic merge patches: user patches plus the standard patches from
-	// the generator, rendered through the template engine when a context exists.
-	// Plain strings without template syntax pass through unchanged.
-	strategicPatches := slices.AppendSeq(config.Spec.StrategicPatches, slices.Values(multiConfigPatches))
-
-	if metadata != nil && len(strategicPatches) > 0 {
-		rendered, err := templatepatch.ProcessTemplates(strategicPatches, metadata)
-		if err != nil {
-			return false, fmt.Errorf("rendering strategicPatches templates: %w", err)
-		}
-
-		strategicPatches = rendered
-	}
-
-	if len(strategicPatches) > 0 {
-		patches := make([]configpatcher.Patch, 0, len(strategicPatches))
-
-		for _, strategicPatch := range strategicPatches {
-			// Phase 1 skips patches that still contain unrendered template
-			// expressions: they are not valid YAML. They are applied in Phase 2.
-			// Ported from cabpt-b7fbe6a-template-rendering.patch:1396-1401.
-			if metadataPending && strings.Contains(strategicPatch, "{{") {
-				continue
-			}
-
-			patch, err := configpatcher.LoadPatch([]byte(strategicPatch))
-			if err != nil {
-				return false, fmt.Errorf("failure loading StrategicPatch: %w", err)
-			}
-
-			patches = append(patches, patch)
-		}
-
-		out, err := configpatcher.Apply(configpatcher.WithBytes([]byte(retData.BootstrapData)), patches)
-		if err != nil {
-			return false, fmt.Errorf("failure applying StrategicPatches: %w", err)
-		}
-
-		outCfg, err := out.Config()
-		if err != nil {
-			return false, fmt.Errorf("failure converting result to bytes: %w", err)
-		}
-
-		retData.BootstrapData, err = outCfg.EncodeString(encoder.WithComments(encoder.CommentsDisabled))
-		if err != nil {
-			return false, fmt.Errorf("failure converting config to string: %w", err)
-		}
+	// Apply the RFC6902 configPatches and the strategic patches (the user's plus
+	// the standard patches from the generator), rendering the templates that
+	// read the metadata context. This is pkg/machineconfig's job, so the
+	// controller and the in-place extension patch a config the same way.
+	bootstrapData, err = machineconfig.ApplyPatches(bootstrapData, machineconfig.PatchInput{
+		ConfigPatches:     config.Spec.ConfigPatches,
+		StrategicPatches:  config.Spec.StrategicPatches,
+		StdPatches:        stdPatches,
+		Metadata:          metadata,
+		MetadataPending:   metadataPending,
+	})
+	if err != nil {
+		return false, err
 	}
 
 	// Packet acts a fool if you don't prepend #!talos to the userdata
@@ -636,7 +580,7 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 		}
 
 		if mp.Spec.Template.Spec.InfrastructureRef.Kind == "PacketMachinePool" {
-			retData.BootstrapData = "#!talos\n" + retData.BootstrapData
+			bootstrapData = "#!talos\n" + bootstrapData
 		}
 	} else {
 		machine := &capiv1.Machine{}
@@ -645,13 +589,13 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 		}
 
 		if machine.Spec.InfrastructureRef.Kind == "PacketMachine" {
-			retData.BootstrapData = "#!talos\n" + retData.BootstrapData
+			bootstrapData = "#!talos\n" + bootstrapData
 		}
 	}
 
 	var dataSecretName string
 
-	dataSecretName, err = r.writeBootstrapData(ctx, tcScope, []byte(retData.BootstrapData), metadataPending)
+	dataSecretName, err = r.writeBootstrapData(ctx, tcScope, []byte(bootstrapData), metadataPending)
 	if err != nil {
 		return false, err
 	}
@@ -802,146 +746,83 @@ func (r *TalosConfigReconciler) userConfigs(ctx context.Context, scope *TalosCon
 	return retBundle, nil
 }
 
-// genConfigs will generate a bootstrap config to return
-func (r *TalosConfigReconciler) genConfigs(ctx context.Context, scope *TalosConfigScope) (*TalosConfigBundle, []string, error) {
-	retBundle := &TalosConfigBundle{}
-
-	// Determine what type of node this is
-	machineType, err := machine.ParseType(scope.Config.Spec.GenerateType)
-	if err != nil {
-		machineType = machine.TypeWorker
-	}
-
-	patches := []string{}
-
+// generateConfigs resolves the parts of the generation that touch the API
+// server (the secrets bundle, the Kubernetes CA secret, the hostname source and
+// the cluster network) and delegates the machine-config generation itself to
+// pkg/machineconfig. It returns the generated configuration and the standard
+// patches the generator produced.
+func (r *TalosConfigReconciler) generateConfigs(ctx context.Context, scope *TalosConfigScope) (string, []string, error) {
 	// Allow user to override default kube version.
 	// This also handles version being formatted like "vX.Y.Z" instead of without leading 'v'
 	// TrimPrefix returns the string unchanged if the prefix isn't present.
 	k8sVersion := constants.DefaultKubernetesVersion
+	hostname := ""
+
 	if scope.ConfigOwner.IsMachinePool() {
 		mp := &capiv1.MachinePool{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(scope.ConfigOwner.Object, mp); err != nil {
-			return retBundle, patches, err
+			return "", nil, err
 		}
+
 		if mp.Spec.Template.Spec.Version != "" {
 			k8sVersion = strings.TrimPrefix(mp.Spec.Template.Spec.Version, "v")
 		}
 	} else {
 		machine := &capiv1.Machine{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(scope.ConfigOwner.Object, machine); err != nil {
-			return retBundle, patches, err
+			return "", nil, err
 		}
+
 		if machine.Spec.Version != "" {
 			k8sVersion = strings.TrimPrefix(machine.Spec.Version, "v")
 		}
-	}
 
-	clusterDNS := constants.DefaultDNSDomain
-	if scope.Cluster.Spec.ClusterNetwork.ServiceDomain != "" {
-		clusterDNS = scope.Cluster.Spec.ClusterNetwork.ServiceDomain
-	}
-
-	genOptions := []generate.Option{generate.WithDNSDomain(clusterDNS)}
-
-	versionContract := defaultVersionContract
-
-	if scope.Config.Spec.TalosVersion != "" {
-		var err error
-		versionContract, err = config.ParseContractFromVersion(scope.Config.Spec.TalosVersion)
-		if err != nil {
-			return retBundle, patches, fmt.Errorf("invalid talos-version: %w", err)
+		// The hostname is only set for machines, not machine pools: a pool has
+		// no single machine identity.
+		if scope.Config.Spec.Hostname.Source != "" {
+			switch scope.Config.Spec.Hostname.Source {
+			case bootstrapv1beta1.HostnameSourceMachineName:
+				hostname = scope.ConfigOwner.GetName()
+			case bootstrapv1beta1.HostnameSourceInfrastructureName:
+				hostname = machine.Spec.InfrastructureRef.Name
+			}
 		}
 	}
 
-	genOptions = append(genOptions, generate.WithVersionContract(versionContract))
+	versionContract, err := machineconfig.VersionContract(scope.Config.Spec.TalosVersion)
+	if err != nil {
+		return "", nil, err
+	}
 
 	secretBundle, err := r.getSecretsBundle(ctx, scope, true, versionContract)
 	if err != nil {
-		return retBundle, patches, err
-	}
-
-	genOptions = append(genOptions, generate.WithSecretsBundle(secretBundle))
-
-	// Talos dropped support for version contracts <= 0.14, but we still need to support old secret bundles
-	if versionContract != nil && versionContract.Major < 1 && versionContract.Minor < 14 {
-		genOptions = append(genOptions, generate.WithClusterDiscovery(false))
-	}
-
-	APIEndpointPort := strconv.Itoa(int(scope.Cluster.Spec.ControlPlaneEndpoint.Port))
-
-	input, err := generate.NewInput(
-		scope.Cluster.Name,
-		"https://"+net.JoinHostPort(scope.Cluster.Spec.ControlPlaneEndpoint.Host, APIEndpointPort),
-		k8sVersion,
-		genOptions...,
-	)
-	if err != nil {
-		return retBundle, patches, err
+		return "", nil, err
 	}
 
 	// Create the secret with kubernetes certs so a kubeconfig can be generated
 	if err = r.writeK8sCASecret(ctx, scope, secretBundle.Certs.K8s); err != nil {
-		return retBundle, patches, err
+		return "", nil, err
 	}
 
-	data, err := input.Config(machineType)
+	data, patches, err := machineconfig.Generate(machineconfig.GenerateInput{
+		ClusterName:          scope.Cluster.Name,
+		ControlPlaneEndpoint: "https://" + net.JoinHostPort(scope.Cluster.Spec.ControlPlaneEndpoint.Host, strconv.Itoa(int(scope.Cluster.Spec.ControlPlaneEndpoint.Port))),
+		KubernetesVersion:    k8sVersion,
+		TalosVersion:         scope.Config.Spec.TalosVersion,
+		SecretsBundle:        secretBundle,
+		GenerateType:         scope.Config.Spec.GenerateType,
+		Hostname:             hostname,
+		DNSDomain:            scope.Cluster.Spec.ClusterNetwork.ServiceDomain,
+		PodSubnets:           scope.Cluster.Spec.ClusterNetwork.Pods.CIDRBlocks,
+		ServiceSubnets:       scope.Cluster.Spec.ClusterNetwork.Services.CIDRBlocks,
+	})
 	if err != nil {
-		return retBundle, patches, err
-	}
-
-	podSubnets := []string{constants.DefaultIPv4PodCIDR}
-	serviceSubnets := []string{constants.DefaultIPv4ServiceCIDR}
-
-	if len(scope.Cluster.Spec.ClusterNetwork.Pods.CIDRBlocks) > 0 {
-		podSubnets = scope.Cluster.Spec.ClusterNetwork.Pods.CIDRBlocks
-	}
-
-	if len(scope.Cluster.Spec.ClusterNetwork.Services.CIDRBlocks) > 0 {
-		serviceSubnets = scope.Cluster.Spec.ClusterNetwork.Services.CIDRBlocks
-	}
-
-	podSubnetPatch, err := patchPodServiceSubnets(versionContract, podSubnets, serviceSubnets)
-	if err != nil {
-		return retBundle, patches, err
-	}
-
-	patches = append(patches, string(podSubnetPatch))
-
-	if !scope.ConfigOwner.IsMachinePool() && scope.Config.Spec.Hostname.Source != "" {
-		if scope.Config.Spec.Hostname.Source == bootstrapv1beta1.HostnameSourceMachineName {
-			hostnamePatch, err := stdpatches.WithStaticHostname(versionContract, scope.ConfigOwner.GetName())
-			if err != nil {
-				return retBundle, patches, err
-			}
-
-			patches = append(patches, string(hostnamePatch))
-		}
-
-		if scope.Config.Spec.Hostname.Source == bootstrapv1beta1.HostnameSourceInfrastructureName {
-			machine := &capiv1.Machine{}
-			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(scope.ConfigOwner.Object, machine); err != nil {
-				return retBundle, patches, err
-			}
-
-			hostnamePatch, err := stdpatches.WithStaticHostname(versionContract, machine.Spec.InfrastructureRef.Name)
-			if err != nil {
-				return retBundle, patches, err
-			}
-
-			patches = append(patches, string(hostnamePatch))
-		}
-	}
-
-	dataOut, err := data.EncodeString(encoder.WithComments(encoder.CommentsDisabled))
-	if err != nil {
-		return retBundle, patches, err
+		return "", nil, err
 	}
 
 	r.Log.Info("patches are", "patches", patches)
 
-	retBundle.BootstrapData = dataOut
-
-	return retBundle, patches, nil
+	return data, patches, nil
 }
 
 // MachineToBootstrapMapFunc is a handler.ToRequestsFunc to be used to enqueue
