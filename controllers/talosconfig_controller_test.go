@@ -440,3 +440,128 @@ func TestMetadataSecretToTalosConfigsEnqueuesPendingConfigs(t *testing.T) {
 	unrelated := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "some-other-secret", Namespace: "default"}}
 	assert.Empty(t, r.MetadataSecretToTalosConfigs(ctx, unrelated))
 }
+
+// newTestMachineSet returns the MachineSet of a new TalosConfigTemplate that the MachineDeployment
+// in-place path moves worker Machines into.
+func newTestMachineSet(name, clusterName string) *capiv1.MachineSet {
+	return &capiv1.MachineSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels:    map[string]string{capiv1.ClusterNameLabel: clusterName},
+		},
+		Spec: capiv1.MachineSetSpec{
+			ClusterName: clusterName,
+			Replicas:    ptr.To[int32](1),
+		},
+	}
+}
+
+// newTestWorkerMachine returns a worker Machine that the MachineDeployment in-place path has moved
+// into newMachineSet. Cluster API marks the Machine with the update-in-progress annotation when it
+// starts the in-place update (core/reconcilers/machine/machine_controller_inplace_update.go:51).
+func newTestWorkerMachine(name, clusterName, infraName string, machineSet *capiv1.MachineSet, annotations map[string]string) *capiv1.Machine {
+	machine := newTestMachine(name, clusterName, infraName)
+	machine.Annotations = annotations
+	machine.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(machineSet, capiv1.GroupVersion.WithKind("MachineSet")),
+	}
+
+	return machine
+}
+
+// The MachineDeployment in-place path writes the spec of a new TalosConfigTemplate onto the existing
+// TalosConfig of a worker Machine while the Machine is marked update-in-progress
+// (core/reconcilers/machinedeployment/machinedeployment_rollout_rollingupdate.go:451,
+// 20240807-in-place-updates-implementation-notes.md:245-253). CABPT must not regenerate the bootstrap
+// data of that Machine until the update is done, whichever object carries the annotation.
+func TestTalosConfigReconcileDoesNotRegenerateBootstrapDataDuringMachineDeploymentInPlaceUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	// The spec of the new TalosConfigTemplate, applied by the MachineSet controller onto the
+	// TalosConfig of the Machine it moved into the new MachineSet.
+	newTemplateSpec := bootstrapv1beta1.TalosConfigSpec{
+		GenerateType:      "worker",
+		TalosVersion:      "v1.14",
+		MetadataFrom:      &bootstrapv1beta1.MetadataFrom{InfrastructureMachine: &bootstrapv1beta1.InfrastructureMachineMetadata{}},
+		TemplateVariables: map[string]string{"installerImage": "ghcr.io/siderolabs/installer:v1.14.0"},
+		DataSecretKey:     "userData",
+		StrategicPatches: []string{
+			"machine:\n  install:\n    image: {{ get \"installerImage\" }}",
+		},
+	}
+
+	cases := []struct {
+		name              string
+		machineAnnotation bool
+		configAnnotation  bool
+		regenerated       bool
+	}{
+		{name: "only the Machine carries the update-in-progress annotation", machineAnnotation: true, regenerated: false},
+		{name: "only the TalosConfig carries the update-in-progress annotation", configAnnotation: true, regenerated: false},
+		{name: "both carry the update-in-progress annotation", machineAnnotation: true, configAnnotation: true, regenerated: false},
+		{name: "no in-place update is in progress", regenerated: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machineAnnotations := map[string]string{}
+			if tc.machineAnnotation {
+				machineAnnotations[capiv1.UpdateInProgressAnnotation] = ""
+			}
+
+			configAnnotations := map[string]string{}
+			if tc.configAnnotation {
+				configAnnotations[capiv1.UpdateInProgressAnnotation] = ""
+			}
+
+			cluster := newTestCluster("test-cluster")
+			newMachineSet := newTestMachineSet("worker-ms-new", "test-cluster")
+			machine := newTestWorkerMachine("worker-machine", "test-cluster", "worker-infra", newMachineSet, machineAnnotations)
+
+			config := newTestTalosConfig("worker-machine", machine, newTemplateSpec)
+			config.Annotations = configAnnotations
+			// Phase 1 already ran: the Machine has bootstrap data, the template patches of the new
+			// template are still pending.
+			config.Status.Initialization.DataSecretCreated = ptr.To(true)
+			config.Status.DataSecretName = "worker-machine"
+			config.Status.TemplatePatchesPending = ptr.To(true)
+
+			phase1Secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-machine", Namespace: "default"},
+				Type:       "bootstrap.cluster.x-k8s.io/secret",
+				Data:       map[string][]byte{"value": []byte("phase-1 bootstrap data")},
+			}
+
+			metadataSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-infra-metadata", Namespace: "default"},
+				Type:       "infrastructure.cluster.x-k8s.io/secret",
+				Data: map[string][]byte{
+					"metaData": []byte("installerImage: ghcr.io/siderolabs/installer:v1.14.0\n"),
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
+				WithObjects(cluster, newMachineSet, machine, config, phase1Secret, metadataSecret).
+				WithStatusSubresource(&bootstrapv1beta1.TalosConfig{}).
+				Build()
+
+			_, updated, err := reconcileTalosConfig(ctx, c, config.Name)
+			assert.NoError(t, err)
+
+			secret, err := getSecret(ctx, c, "worker-machine")
+			assert.NoError(t, err)
+
+			if tc.regenerated {
+				assert.NotEmpty(t, secret.Data["userData"], "the bootstrap data is regenerated once the in-place update is over")
+				assert.False(t, ptr.Deref(updated.Status.TemplatePatchesPending, false), "the pending template patches are rendered")
+				return
+			}
+
+			assert.Equal(t, []byte("phase-1 bootstrap data"), secret.Data["value"], "the existing bootstrap data is left untouched during the in-place update")
+			assert.NotContains(t, secret.Data, "userData", "no bootstrap data is regenerated during the in-place update")
+			assert.True(t, ptr.Deref(updated.Status.TemplatePatchesPending, false), "the template patches of the new template stay pending until the update finishes")
+		})
+	}
+}

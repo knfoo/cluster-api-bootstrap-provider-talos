@@ -296,3 +296,105 @@ func TestTalosConfigValidateUpdateRejectsTemplateRenderingFieldsWhenGateDisabled
 		assert.True(t, apierrors.IsBadRequest(err), "expected a bad request error for a change to %s while the gate is off", name)
 	}
 }
+
+// workerSpec is the TalosConfig of a worker Machine managed by a MachineDeployment: its spec comes
+// from a TalosConfigTemplate, so Cluster API's in-place path rewrites the existing TalosConfig with
+// the spec of a new template instead of rolling the Machine out.
+func workerSpec() TalosConfigSpec {
+	return TalosConfigSpec{
+		GenerateType:     "worker",
+		TalosVersion:     "v1.14",
+		Hostname:         HostnameSpec{Source: HostnameSourceMachineName},
+		StrategicPatches: []string{"- system: hostname: from-the-old-template"},
+	}
+}
+
+func specFromNewTemplate(mut func(*TalosConfigSpec)) TalosConfigSpec {
+	spec := workerSpec()
+	spec.StrategicPatches = []string{"- system: hostname: from-the-new-template"}
+
+	if mut != nil {
+		mut(&spec)
+	}
+
+	return spec
+}
+
+// Cluster API's MachineDeployment in-place path applies the spec of a new TalosConfigTemplate onto the
+// TalosConfig of a worker Machine while marking it update-in-progress
+// (core/reconcilers/machinedeployment/machinedeployment_canupdatemachineset.go:127-165,
+// 20240807-in-place-updates-implementation-notes.md:245-253). CABPT accepts that rewrite; anything
+// that decides how the machine is generated still needs a rollout.
+func TestTalosConfigValidateUpdateAcceptsWorkerConfigRewrittenByANewTemplate(t *testing.T) {
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.InPlaceUpdates, true)
+
+	old := talosConfigWith(workerSpec())
+
+	accepted := map[string]TalosConfigSpec{
+		"strategicPatches from the new template": specFromNewTemplate(nil),
+		"configPatches from the new template": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.ConfigPatches = []ConfigPatches{{Op: "replace", Path: "/system/hostname", Value: patchValue("worker-1")}}
+		}),
+		"data written by the update extension": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.Data = "#!talos\napiVersion: v1\nkind: Machine\nmetadata:\n  tags:\n    role: worker\n"
+		}),
+		"metadataFrom, templateVariables and dataSecretKey from the new template": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.MetadataFrom = &MetadataFrom{InfrastructureMachine: &InfrastructureMachineMetadata{}}
+			s.TemplateVariables = map[string]string{"installerImage": "ghcr.io/siderolabs/installer:v1.14.0"}
+			s.DataSecretKey = "userData"
+		}),
+		"no change at all": workerSpec(),
+	}
+
+	for name, spec := range accepted {
+		updated := talosConfigWith(spec)
+
+		_, err := updated.ValidateUpdate(updateContext(), old, updated)
+
+		assert.NoError(t, err, "expected the TalosConfig of a worker Machine to take the spec of the new template (%s)", name)
+	}
+
+	rejected := map[string]TalosConfigSpec{
+		"talosVersion changed by the new template": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.TalosVersion = "v1.15"
+		}),
+		"generateType changed by the new template": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.GenerateType = "controlplane"
+		}),
+		"hostname source changed by the new template": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.Hostname = HostnameSpec{Source: HostnameSourceInfrastructureName}
+		}),
+		"mutable and immutable change together": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.TalosVersion = "v1.15"
+		}),
+		"metadataFrom with two sources": specFromNewTemplate(func(s *TalosConfigSpec) {
+			s.MetadataFrom = &MetadataFrom{
+				SecretRef:             &MetadataSecretRef{Name: "worker-metadata"},
+				InfrastructureMachine: &InfrastructureMachineMetadata{},
+			}
+		}),
+	}
+
+	for name, spec := range rejected {
+		updated := talosConfigWith(spec)
+
+		_, err := updated.ValidateUpdate(updateContext(), old, updated)
+
+		assert.Error(t, err, "expected the TalosConfig to reject the change to %s: it requires a rollout", name)
+	}
+}
+
+// With the gate off, as it is by default, a worker TalosConfig keeps the pre-in-place behaviour: no
+// spec change from a new template is accepted.
+func TestTalosConfigValidateUpdateRejectsWorkerConfigRewrittenByANewTemplateWhenGateDisabled(t *testing.T) {
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.InPlaceUpdates, false)
+
+	old := talosConfigWith(workerSpec())
+	updated := talosConfigWith(specFromNewTemplate(nil))
+
+	_, err := updated.ValidateUpdate(updateContext(), old, updated)
+
+	assert.Error(t, err, "expected a spec change from a new template to be rejected while the gate is off")
+	assert.Contains(t, err.Error(), "immutable", "expected the immutable guard to reject the template rewrite while the gate is off")
+	assert.True(t, apierrors.IsBadRequest(err), "expected a bad request error for the template rewrite while the gate is off")
+}

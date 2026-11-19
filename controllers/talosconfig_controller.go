@@ -320,6 +320,15 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 
+		// Pending template patches must not be rendered while the Machine is being updated in
+		// place: rewriting the bootstrap data of a machine that is already running would be
+		// picked up by nothing, and it races with the update extension (bootstrap-config.md:364-365).
+		if needsPhase2 && inPlaceUpdateInProgress(config, owner) {
+			log.Info("TalosConfig is being updated in place, not re-rendering the bootstrap data")
+
+			return ctrl.Result{}, nil
+		}
+
 		if !needsPhase2 {
 			log.Info("ignoring an already ready config")
 			v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
@@ -405,7 +414,7 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// provider must not regenerate the bootstrap data for the changed TalosConfig
 	// (CAPI bootstrap contract, bootstrap-config.md:364-365). The trigger that sets this annotation
 	// on the bootstrap config is KCP's triggerInPlaceUpdate (inplace_trigger.go:108-111).
-	if _, inPlaceUpdate := config.GetAnnotations()[capiv1.UpdateInProgressAnnotation]; inPlaceUpdate {
+	if inPlaceUpdateInProgress(config, owner) {
 		log.Info("TalosConfig is being updated in place, not regenerating the bootstrap data")
 
 		return ctrl.Result{}, nil
@@ -464,6 +473,28 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	})
 
 	return ctrl.Result{}, nil
+}
+
+// inPlaceUpdateInProgress reports whether Cluster API has marked this TalosConfig, or the Machine
+// owning it, as being updated in place. Cluster API tracks the update on the Machine, the
+// InfraMachine and the bootstrap config separately: the Machine controller reads the annotation off
+// the Machine (core/reconcilers/machine/machine_controller_inplace_update.go:51) and waits for it on
+// the bootstrap config before calling UpdateMachine (machine_controller_inplace_update.go:133-139).
+// Checking the owner as well as the TalosConfig keeps the bootstrap provider from regenerating
+// bootstrap data for a worker Machine that the MachineSet controller has already moved to a new
+// MachineSet and is updating in place.
+func inPlaceUpdateInProgress(config *bootstrapv1beta1.TalosConfig, owner *ConfigOwner) bool {
+	if _, ok := config.GetAnnotations()[capiv1.UpdateInProgressAnnotation]; ok {
+		return true
+	}
+
+	if owner != nil {
+		if _, ok := owner.GetAnnotations()[capiv1.UpdateInProgressAnnotation]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // reconcileGenerate generates the Talos machine configuration and writes the
