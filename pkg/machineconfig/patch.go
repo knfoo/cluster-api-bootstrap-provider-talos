@@ -48,6 +48,13 @@ type PatchInput struct {
 	// skipped so the bootstrap data can be written without them, and they are
 	// rendered on the next reconcile.
 	MetadataPending bool
+
+	// MachineName and MachineInfraRef identify the machine the configuration is
+	// generated for, which the template context exposes as machine.name and
+	// machine.infrastructureRef.name. Both are empty for a MachinePool, which
+	// has no single machine identity.
+	MachineName     string
+	MachineInfraRef string
 }
 
 // ApplyPatches returns the machine configuration in base with the patches of
@@ -81,9 +88,9 @@ func ApplyPatches(base string, in PatchInput) (string, error) {
 		data = string(patchedBytes)
 	}
 
-	// Build the template context from metadata and the inline template
-	// variables. Ported from
-	// cabpt-b7fbe6a-template-rendering.patch:1331-1390.
+	// Build the template context from the metadata, the inline template variables
+	// and the machine. Without metadata and without template variables there is
+	// no context, and patches without template syntax pass through unchanged.
 	context := in.Metadata
 
 	if context == nil && len(in.TemplateVariables) > 0 && !in.MetadataPending {
@@ -91,18 +98,20 @@ func ApplyPatches(base string, in PatchInput) (string, error) {
 	}
 
 	if context != nil {
-		if len(in.TemplateVariables) > 0 {
-			merged := make(map[string]string, len(context)+len(in.TemplateVariables))
+		merged := make(map[string]string, len(context)+len(in.TemplateVariables))
 
-			for key, value := range context {
-				merged[key] = value
-			}
-
-			// Inline template variables take precedence over metadata values.
-			templatepatch.MergeVariables(merged, in.TemplateVariables)
-
-			context = merged
+		for key, value := range context {
+			merged[key] = value
 		}
+
+		// Inline template variables take precedence over metadata values.
+		templatepatch.MergeVariables(merged, in.TemplateVariables)
+
+		// Machine context, so patches can use {{ get "machine.name" }} and
+		// {{ get "machine.infrastructureRef.name" }}.
+		templatepatch.EnrichWithMachine(merged, in.MachineName, in.MachineInfraRef)
+
+		context = merged
 	}
 
 	// Handle strategic merge patches: user patches plus the standard patches
@@ -125,7 +134,6 @@ func ApplyPatches(base string, in PatchInput) (string, error) {
 		for _, strategicPatch := range strategicPatches {
 			// Phase 1 skips patches that still contain unrendered template
 			// expressions: they are not valid YAML. They are applied in Phase 2.
-			// Ported from cabpt-b7fbe6a-template-rendering.patch:1396-1401.
 			if in.MetadataPending && strings.Contains(strategicPatch, "{{") {
 				continue
 			}

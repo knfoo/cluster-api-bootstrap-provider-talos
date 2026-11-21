@@ -170,8 +170,7 @@ func (r *TalosConfigReconciler) writeK8sCASecret(ctx context.Context, scope *Tal
 // Configs that read infrastructure metadata (metadataFrom) are named after the
 // TalosConfig and use dataSecretKey (default "value"): Machine.Spec.Bootstrap.ConfigRef.Name
 // resolves to the same secret, which is what CAPM3 falls back to before
-// Machine.Spec.Bootstrap.DataSecretName is set (see
-// cabpt-b7fbe6a-template-rendering.patch:957-1030). Configs without metadataFrom
+// Machine.Spec.Bootstrap.DataSecretName is set. Configs without metadataFrom
 // keep the owner-based name and the "value" key, so existing clusters see no change.
 //
 // With metadataPending (Phase 1) the secret is created with no data keys, so the
