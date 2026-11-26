@@ -52,12 +52,12 @@ type TalosConfigSpec struct {
 	StrategicPatches []string `json:"strategicPatches,omitempty"`
 
 	// MetadataFrom specifies where to read infrastructure metadata for template
-	// processing. The metadata secret may contain flat key:value pairs, YAML, or
-	// JSON — nested structures are flattened to dot-notation keys automatically.
-	// When set, StrategicPatches are rendered through Go's text/template engine
-	// with functions: get(key), has(key), default(fallback, value),
-	// required(errMsg, value). Plain strings without template syntax pass through
-	// unchanged.
+	// processing. The metadata secret data is read as YAML and keeps its nesting,
+	// so a strategic patch reads a value as .key or .group.key and a list element
+	// as index .group.items 0. When set, StrategicPatches are rendered through Go's
+	// text/template engine with the metadata as the dot, the cluster under .cluster
+	// and the machine under .machine; a key that is not present fails the render
+	// with its name. Plain strings without template syntax pass through unchanged.
 	// Mutable: applied in place to the Machine configuration.
 	// +optional
 	MetadataFrom *MetadataFrom `json:"metadataFrom,omitempty"`
@@ -68,10 +68,9 @@ type TalosConfigSpec struct {
 	// +optional
 	DataSecretKey string `json:"dataSecretKey,omitempty"`
 
-	// TemplateVariables are inline key-value pairs merged into the template
-	// context alongside metadata from MetadataFrom. These are available in
-	// StrategicPatches via {{get "key"}} or {{.key}}.
-	// Template variables take precedence over metadata values for the same key.
+	// TemplateVariables are inline key-value pairs available in StrategicPatches
+	// as top-level keys, for example {{ .installerImage }}. They override metadata
+	// values of the same name.
 	// Mutable: applied in place to the Machine configuration.
 	// +optional
 	TemplateVariables map[string]string `json:"templateVariables,omitempty"`
@@ -91,7 +90,7 @@ type MetadataFrom struct {
 	InfrastructureMachine *InfrastructureMachineMetadata `json:"infrastructureMachine,omitempty"`
 }
 
-// MetadataSecretRef references a secret containing metadata key:value pairs.
+// MetadataSecretRef references a secret whose data is YAML metadata for the patches.
 type MetadataSecretRef struct {
 	// Name of the secret in the same namespace as the TalosConfig.
 	Name string `json:"name"`

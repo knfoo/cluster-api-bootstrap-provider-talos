@@ -248,7 +248,7 @@ func TestTalosConfigValidateUpdateAllowsTemplateRenderingFields(t *testing.T) {
 		}(),
 		"strategicPatches with templates": func() TalosConfigSpec {
 			spec := baseSpec()
-			spec.StrategicPatches = []string{`- network: hostname: {{ get "hostname" }}`}
+			spec.StrategicPatches = []string{`- network: hostname: {{ .hostname }}`}
 			return spec
 		}(),
 	}

@@ -20,9 +20,9 @@ import (
 
 // PatchInput is the patching half of a machine configuration: the RFC6902
 // configPatches, the strategic patches (the user's plus the standard ones the
-// generator produced), and the template context the strategic patches are
-// rendered with. Like GenerateInput it is a plain value with no client: the
-// caller reads the metadata secret and builds the context.
+// generator produced), and the data the strategic patch templates are rendered
+// with. Like GenerateInput it is a plain value with no client: the caller reads
+// the metadata secret and builds the data with TemplateData.
 type PatchInput struct {
 	// ConfigPatches are RFC6902 JSON patches applied to the machine config.
 	ConfigPatches []bootstrapv1beta1.ConfigPatches
@@ -34,27 +34,16 @@ type PatchInput struct {
 	// StdPatches are the standard strategic patches returned by Generate.
 	StdPatches []string
 
-	// Metadata is the template context: infrastructure metadata (for example
-	// the Metal3DataTemplate metadata secret of CAPM3) enriched with cluster
-	// and machine keys. A nil context means no template rendering.
-	Metadata map[string]string
-
-	// TemplateVariables are the inline templateVariables of the TalosConfig.
-	// They take precedence over metadata values for the same key.
-	TemplateVariables map[string]string
+	// TemplateData is the nested data TemplateData builds from the metadata
+	// secret, the Cluster and the Machine. A nil value means there is no
+	// template context and the patches are applied as written.
+	TemplateData map[string]any
 
 	// MetadataPending is true when metadataFrom is configured but the metadata
 	// is not available yet: patches that still contain template expressions are
 	// skipped so the bootstrap data can be written without them, and they are
 	// rendered on the next reconcile.
 	MetadataPending bool
-
-	// MachineName and MachineInfraRef identify the machine the configuration is
-	// generated for, which the template context exposes as machine.name and
-	// machine.infrastructureRef.name. Both are empty for a MachinePool, which
-	// has no single machine identity.
-	MachineName     string
-	MachineInfraRef string
 }
 
 // ApplyPatches returns the machine configuration in base with the patches of
@@ -88,39 +77,13 @@ func ApplyPatches(base string, in PatchInput) (string, error) {
 		data = string(patchedBytes)
 	}
 
-	// Build the template context from the metadata, the inline template variables
-	// and the machine. Without metadata and without template variables there is
-	// no context, and patches without template syntax pass through unchanged.
-	context := in.Metadata
-
-	if context == nil && len(in.TemplateVariables) > 0 && !in.MetadataPending {
-		context = make(map[string]string)
-	}
-
-	if context != nil {
-		merged := make(map[string]string, len(context)+len(in.TemplateVariables))
-
-		for key, value := range context {
-			merged[key] = value
-		}
-
-		// Inline template variables take precedence over metadata values.
-		templatepatch.MergeVariables(merged, in.TemplateVariables)
-
-		// Machine context, so patches can use {{ get "machine.name" }} and
-		// {{ get "machine.infrastructureRef.name" }}.
-		templatepatch.EnrichWithMachine(merged, in.MachineName, in.MachineInfraRef)
-
-		context = merged
-	}
-
 	// Handle strategic merge patches: user patches plus the standard patches
-	// from the generator, rendered through the template engine when a context
-	// exists. Plain strings without template syntax pass through unchanged.
+	// from the generator, rendered through the template engine when template
+	// data exists. Plain strings without template syntax pass through unchanged.
 	strategicPatches := slices.Concat(in.StrategicPatches, in.StdPatches)
 
-	if context != nil && len(strategicPatches) > 0 {
-		rendered, err := templatepatch.ProcessTemplates(strategicPatches, context)
+	if in.TemplateData != nil && len(strategicPatches) > 0 {
+		rendered, err := templatepatch.ProcessTemplates(strategicPatches, in.TemplateData)
 		if err != nil {
 			return "", fmt.Errorf("rendering strategicPatches templates: %w", err)
 		}

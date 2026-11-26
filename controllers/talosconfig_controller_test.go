@@ -229,7 +229,7 @@ func TestTalosConfigReconcileRendersStrategicPatchTemplatesWithVariables(t *test
 		GenerateType: "worker",
 		TalosVersion: "v1.14",
 		StrategicPatches: []string{
-			"machine:\n  install:\n    image: {{ get \"installerImage\" }}",
+			"machine:\n  install:\n    image: {{ .installerImage }}",
 		},
 		TemplateVariables: map[string]string{
 			"installerImage": "ghcr.io/example/installer:rendered",
@@ -271,8 +271,8 @@ func TestTalosConfigReconcileTwoPhaseMetadataBootstrap(t *testing.T) {
 		MetadataFrom:  &bootstrapv1beta1.MetadataFrom{InfrastructureMachine: &bootstrapv1beta1.InfrastructureMachineMetadata{}},
 		DataSecretKey: "userData",
 		StrategicPatches: []string{
-			"machine:\n  install:\n    image: {{ get \"installerImage\" }}",
-			"machine:\n  network:\n    hostname: {{ get \"machine.name\" }}-{{ get \"cluster.name\" }}",
+			"machine:\n  install:\n    image: {{ .installerImage }}",
+			"machine:\n  network:\n    hostname: {{ .machine.name }}-{{ .cluster.name }}",
 		},
 	})
 
@@ -331,7 +331,7 @@ func TestTalosConfigReconcileTemplateParseFailureReportsDataSecretUnavailable(t 
 		TalosVersion:      "v1.14",
 		TemplateVariables: map[string]string{"disk": "/dev/nvme0n1"},
 		StrategicPatches: []string{
-			"machine: {{ get \"disk\"",
+			"machine: {{ .disk",
 		},
 	})
 
@@ -348,7 +348,7 @@ func TestTalosConfigReconcileTemplateParseFailureReportsDataSecretUnavailable(t 
 	dataSecretAvailable := conditions.Get(updated, bootstrapv1beta1.DataSecretAvailableCondition)
 	assert.NotNil(t, dataSecretAvailable)
 	assert.Equal(t, metav1.ConditionFalse, dataSecretAvailable.Status)
-	assert.Contains(t, dataSecretAvailable.Message, "machine: {{ get \"disk\"")
+	assert.Contains(t, dataSecretAvailable.Message, "machine: {{ .disk")
 
 	_, err = getSecret(ctx, c, "test-machine-bootstrap-data")
 	assert.True(t, apierrors.IsNotFound(err), "no bootstrap secret is written when the template fails to render")
@@ -487,7 +487,7 @@ func TestTalosConfigReconcileDoesNotRegenerateBootstrapDataDuringMachineDeployme
 		TemplateVariables: map[string]string{"installerImage": "ghcr.io/siderolabs/installer:v1.14.0"},
 		DataSecretKey:     "userData",
 		StrategicPatches: []string{
-			"machine:\n  install:\n    image: {{ get \"installerImage\" }}",
+			"machine:\n  install:\n    image: {{ .installerImage }}",
 		},
 	}
 

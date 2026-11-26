@@ -26,8 +26,8 @@ type TalosConfigSpec struct {
 	Hostname HostnameSpec `json:"hostname,omitempty"`
 
 	// MetadataFrom specifies where to read infrastructure metadata for template
-	// processing. When set, StrategicPatches are rendered through Go's
-	// text/template engine. Supports flat key:value, YAML, or JSON formats.
+	// processing. The metadata secret data is read as YAML and keeps its nesting.
+	// When set, StrategicPatches are rendered through Go's text/template engine.
 	// +optional
 	MetadataFrom *MetadataFrom `json:"metadataFrom,omitempty"`
 
@@ -36,8 +36,9 @@ type TalosConfigSpec struct {
 	// +optional
 	DataSecretKey string `json:"dataSecretKey,omitempty"`
 
-	// TemplateVariables are inline key-value pairs merged into the template
-	// context alongside metadata from MetadataFrom.
+	// TemplateVariables are inline key-value pairs available in StrategicPatches
+	// as top-level keys, for example {{ .installerImage }}. They override metadata
+	// values of the same name.
 	// +optional
 	TemplateVariables map[string]string `json:"templateVariables,omitempty"`
 
@@ -56,7 +57,7 @@ type MetadataFrom struct {
 	InfrastructureMachine *InfrastructureMachineMetadata `json:"infrastructureMachine,omitempty"`
 }
 
-// MetadataSecretRef references a secret containing metadata key:value pairs.
+// MetadataSecretRef references a secret whose data is YAML metadata for the patches.
 type MetadataSecretRef struct {
 	// Name of the secret in the same namespace as the TalosConfig.
 	Name string `json:"name"`

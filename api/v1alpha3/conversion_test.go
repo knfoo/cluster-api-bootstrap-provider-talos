@@ -119,7 +119,7 @@ func TestTalosConfigConversionRoundTripTemplateFields(t *testing.T) {
 			Spec: TalosConfigSpec{
 				GenerateType:     "controlplane",
 				TalosVersion:     "v1.14",
-				StrategicPatches: []string{`- network: hostname: {{ get "hostname" }}`},
+				StrategicPatches: []string{`- network: hostname: {{ .hostname }}`},
 				MetadataFrom:     metadataFrom,
 				DataSecretKey:    "userData",
 				TemplateVariables: map[string]string{

@@ -46,7 +46,6 @@ import (
 
 	bootstrapv1beta1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1beta1"
 	"github.com/siderolabs/cluster-api-bootstrap-provider-talos/pkg/machineconfig"
-	"github.com/siderolabs/cluster-api-bootstrap-provider-talos/pkg/templatepatch"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -560,24 +559,21 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 		machineName = machineObj.Name
 	}
 
-	metadata, metadataPending, err := r.resolveMetadata(ctx, tcScope, infraRefName)
+	templateData, metadataPending, err := r.resolveTemplateData(ctx, tcScope, machineName, infraRefName)
 	if err != nil {
 		return false, fmt.Errorf("resolving metadata: %w", err)
 	}
 
 	// Apply the RFC6902 configPatches and the strategic patches (the user's plus
 	// the standard patches from the generator), rendering the templates that
-	// read the metadata context. This is pkg/machineconfig's job, so the
-	// controller and the in-place extension patch a config the same way.
+	// read the metadata. This is pkg/machineconfig's job, so the controller and
+	// the in-place extension patch a config the same way.
 	bootstrapData, err = machineconfig.ApplyPatches(bootstrapData, machineconfig.PatchInput{
-		ConfigPatches:     config.Spec.ConfigPatches,
-		StrategicPatches:  config.Spec.StrategicPatches,
-		StdPatches:        stdPatches,
-		Metadata:          metadata,
-		TemplateVariables: config.Spec.TemplateVariables,
-		MetadataPending:   metadataPending,
-		MachineName:       machineName,
-		MachineInfraRef:   infraRefName,
+		ConfigPatches:    config.Spec.ConfigPatches,
+		StrategicPatches: config.Spec.StrategicPatches,
+		StdPatches:       stdPatches,
+		TemplateData:     templateData,
+		MetadataPending:  metadataPending,
 	})
 	if err != nil {
 		return false, err
@@ -607,39 +603,48 @@ func (r *TalosConfigReconciler) reconcileDelete(config *bootstrapv1beta1.TalosCo
 	return ctrl.Result{}, nil
 }
 
-// resolveMetadata reads the infrastructure metadata of metadataFrom from the secret
-// machineconfig.MetadataSecret names, enriched with cluster data, and reports whether
-// the metadata is only temporarily missing: Metal3/CAPM3 creates its metadata claim
-// after the bootstrap data exists, so the bootstrap secret is written without the
-// template patches (Phase 1) and they are rendered when the secret appears (Phase 2).
-func (r *TalosConfigReconciler) resolveMetadata(ctx context.Context, scope *TalosConfigScope, infraRefName string) (map[string]string, bool, error) {
-	if scope.Config.Spec.MetadataFrom == nil {
+// resolveTemplateData builds the data the strategic patch templates of metadataFrom
+// render with: the metadata read from the secret machineconfig.MetadataSecret names,
+// the cluster and the machine, with the inline templateVariables on top. It reports
+// whether the metadata is only temporarily missing: Metal3/CAPM3 creates its metadata
+// claim after the bootstrap data exists, so the bootstrap secret is written without
+// the template patches (Phase 1) and they are rendered when the secret appears (Phase 2).
+func (r *TalosConfigReconciler) resolveTemplateData(ctx context.Context, scope *TalosConfigScope, machineName, infraRefName string) (map[string]any, bool, error) {
+	if scope.Config.Spec.MetadataFrom == nil && len(scope.Config.Spec.TemplateVariables) == 0 {
 		return nil, false, nil
 	}
 
-	secretName, dataKey, err := machineconfig.MetadataSecret(&scope.Config.Spec, infraRefName)
+	var raw []byte
+
+	if scope.Config.Spec.MetadataFrom != nil {
+		secretName, dataKey, err := machineconfig.MetadataSecret(&scope.Config.Spec, infraRefName)
+		if err != nil {
+			return nil, false, err
+		}
+
+		secret, err := r.fetchSecret(ctx, scope.Config, secretName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, true, nil
+			}
+
+			return nil, false, fmt.Errorf("failed to fetch metadata secret %q: %w", secretName, err)
+		}
+
+		metadata, found := secret.Data[dataKey]
+		if !found {
+			return nil, false, fmt.Errorf("metadata secret %q does not contain key %q", secretName, dataKey)
+		}
+
+		raw = metadata
+	}
+
+	data, err := machineconfig.TemplateData(raw, scope.Cluster, machineName, infraRefName, scope.Config.Spec.TemplateVariables)
 	if err != nil {
 		return nil, false, err
 	}
 
-	secret, err := r.fetchSecret(ctx, scope.Config, secretName)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, true, nil
-		}
-
-		return nil, false, fmt.Errorf("failed to fetch metadata secret %q: %w", secretName, err)
-	}
-
-	raw, ok := secret.Data[dataKey]
-	if !ok {
-		return nil, false, fmt.Errorf("metadata secret %q does not contain key %q", secretName, dataKey)
-	}
-
-	metadata := templatepatch.ParseMetadata(raw)
-	templatepatch.EnrichWithCluster(metadata, scope.Cluster)
-
-	return metadata, false, nil
+	return data, false, nil
 }
 
 func genTalosConfigFile(clusterName string, bundle *secrets.Bundle, endpoints []string) (string, error) {

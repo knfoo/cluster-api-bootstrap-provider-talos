@@ -10,6 +10,7 @@ import (
 	bootstrapv1beta1 "github.com/siderolabs/cluster-api-bootstrap-provider-talos/api/v1beta1"
 	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
@@ -58,9 +59,12 @@ func TestApplyPatchesStrategic(t *testing.T) {
 }
 
 func TestApplyPatchesTemplateWithMetadata(t *testing.T) {
+	data, err := TemplateData([]byte("image: ghcr.io/siderolabs/installer:v1.14.0\n"), nil, "", "", nil)
+	require.NoError(t, err)
+
 	out, err := ApplyPatches(minimalConfig, PatchInput{
-		StrategicPatches: []string{"machine:\n  install:\n    image: {{ get \"image\" }}\n"},
-		Metadata:         map[string]string{"image": "ghcr.io/siderolabs/installer:v1.14.0"},
+		StrategicPatches: []string{"machine:\n  install:\n    image: {{ .image }}\n"},
+		TemplateData:     data,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -69,29 +73,65 @@ func TestApplyPatchesTemplateWithMetadata(t *testing.T) {
 	assert.Contains(t, out, "ghcr.io/siderolabs/installer:v1.14.0")
 }
 
-func TestApplyPatchesTemplateVariablesWin(t *testing.T) {
+func TestApplyPatchesTemplateVariableOverridesMetadata(t *testing.T) {
+	data, err := TemplateData(
+		[]byte("image: ghcr.io/siderolabs/installer:from-metadata\n"),
+		nil,
+		"",
+		"",
+		map[string]string{"image": "ghcr.io/siderolabs/installer:from-variables"},
+	)
+	require.NoError(t, err)
+
 	out, err := ApplyPatches(minimalConfig, PatchInput{
-		StrategicPatches:  []string{"machine:\n  install:\n    image: {{ get \"image\" }}\n"},
-		Metadata:          map[string]string{"image": "ghcr.io/siderolabs/installer:from-metadata"},
-		TemplateVariables: map[string]string{"image": "ghcr.io/siderolabs/installer:from-variables"},
+		StrategicPatches: []string{"machine:\n  install:\n    image: {{ .image }}\n"},
+		TemplateData:     data,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	assert.Contains(t, out, "from-variables")
 	assert.NotContains(t, out, "from-metadata")
 }
 
+func TestApplyPatchesTemplateReadsNestedMetadataAndLists(t *testing.T) {
+	data, err := TemplateData(
+		[]byte("network:\n  internal:\n    - 10.0.0.0/24\nrack: 2\n"),
+		testCluster(),
+		"worker-1",
+		"worker-infra",
+		nil,
+	)
+	require.NoError(t, err)
+
+	out, err := ApplyPatches(minimalConfig, PatchInput{
+		StrategicPatches: []string{
+			"machine:\n  network:\n    hostname: {{ .machine.name }}-{{ index .network.internal 0 }}\n",
+		},
+		StdPatches:   []string{"cluster:\n  network:\n    podSubnets:\n      - {{ index .cluster.clusterNetwork.pods.cidrBlocks 0 }}\n"},
+		TemplateData: data,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "hostname: worker-1-10.0.0.0/24")
+	assert.Contains(t, out, "10.244.0.0/16")
+}
+
+func TestApplyPatchesMissingTemplateKeyFails(t *testing.T) {
+	_, err := ApplyPatches(minimalConfig, PatchInput{
+		StrategicPatches: []string{"machine:\n  network:\n    hostname: {{ .hostname }}\n"},
+		TemplateData:     map[string]any{"zone": "a"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hostname")
+	assert.NotContains(t, err.Error(), "<no value>")
+}
+
 func TestApplyPatchesMetadataPendingSkipsBraces(t *testing.T) {
 	out, err := ApplyPatches(minimalConfig, PatchInput{
-		StrategicPatches:  []string{"machine:\n  install:\n    image: {{ get \"image\" }}\n"},
-		TemplateVariables: map[string]string{"image": "ghcr.io/siderolabs/installer:v1.14.0"},
-		MetadataPending:   true,
+		StrategicPatches: []string{"machine:\n  install:\n    image: {{ .image }}\n"},
+		MetadataPending:  true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	assert.NotContains(t, out, "{{")
 	assert.NotContains(t, out, "ghcr.io/siderolabs/installer:v1.14.0")
@@ -99,7 +139,7 @@ func TestApplyPatchesMetadataPendingSkipsBraces(t *testing.T) {
 
 func TestApplyPatchesBraceWithoutContextFails(t *testing.T) {
 	_, err := ApplyPatches(minimalConfig, PatchInput{
-		StrategicPatches: []string{"machine:\n  install:\n    image: {{ get \"image\" }}\n"},
+		StrategicPatches: []string{"machine:\n  install:\n    image: {{ .image }}\n"},
 	})
 	assert.Error(t, err)
 }
