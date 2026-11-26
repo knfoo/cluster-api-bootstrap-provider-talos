@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -520,16 +519,25 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 
 	// The config owner is a Machine or a MachinePool. Its infrastructure reference
 	// names the metadata secret of metadataFrom and its kind tells whether the
-	// userdata needs the Talos shebang. GetConfigOwner already holds the owner as an
-	// unstructured object, so read those fields from it instead of converting it again.
+	// userdata needs the Talos shebang, so the owner is read once here.
 	infraRefName, infraKind, machineName := "", "", ""
 
 	if tcScope.ConfigOwner.IsMachinePool() {
-		infraKind, _, _ = unstructured.NestedString(tcScope.ConfigOwner.Object, "spec", "template", "spec", "infrastructureRef", "kind")
+		mp := &capiv1.MachinePool{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, mp); err != nil {
+			return false, err
+		}
+
+		infraKind = mp.Spec.Template.Spec.InfrastructureRef.Kind
 	} else {
-		infraRefName, _, _ = unstructured.NestedString(tcScope.ConfigOwner.Object, "spec", "infrastructureRef", "name")
-		infraKind, _, _ = unstructured.NestedString(tcScope.ConfigOwner.Object, "spec", "infrastructureRef", "kind")
-		machineName = tcScope.ConfigOwner.GetName()
+		machineObj := &capiv1.Machine{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, machineObj); err != nil {
+			return false, err
+		}
+
+		infraRefName = machineObj.Spec.InfrastructureRef.Name
+		infraKind = machineObj.Spec.InfrastructureRef.Kind
+		machineName = machineObj.Name
 	}
 
 	templateData, metadataPending, err := r.resolveTemplateData(ctx, tcScope, machineName, infraRefName)
