@@ -20,7 +20,7 @@ spec:
             - /manager
           args:
             - --enable-leader-election
-            - "--feature-gates=MachinePool=${EXP_MACHINE_POOL:=false}"
+            - "--feature-gates=MachinePool=${EXP_MACHINE_POOL:=false},InPlaceUpdates=${EXP_IN_PLACE_UPDATES:=false}"
             - "--diagnostics-address=${CAPI_DIAGNOSTICS_ADDRESS:=:8443}"
             - "--insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}"
           image: controller:latest
