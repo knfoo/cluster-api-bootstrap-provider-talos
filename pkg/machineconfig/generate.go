@@ -63,12 +63,6 @@ type GenerateInput struct {
 // Generate builds the Talos machine configuration for in and returns it
 // together with the standard patches the generator produces (pod/service
 // subnets and the static hostname).
-//
-// This is the machine-config generation formerly living in
-// controllers/talosconfig_controller.go:806-945 (genConfigs) and
-// controllers/patches.go:17-64 (patchPodServiceSubnets), moved here so the
-// bootstrap controller and the in-place update extension share one
-// implementation.
 func Generate(in GenerateInput) (string, []string, error) {
 	// Determine what type of node this is.
 	machineType, err := machine.ParseType(in.GenerateType)
@@ -158,9 +152,7 @@ func Generate(in GenerateInput) (string, []string, error) {
 	return dataOut, patches, nil
 }
 
-// VersionContract returns the Talos version contract for a Talos version
-// string, defaulting to the current contract. Ported from the
-// version-contract handling in controllers/talosconfig_controller.go:846-854.
+// VersionContract returns the version contract, defaulting to the current one.
 func VersionContract(talosVersion string) (*config.VersionContract, error) {
 	if talosVersion == "" {
 		return config.TalosVersionCurrent, nil

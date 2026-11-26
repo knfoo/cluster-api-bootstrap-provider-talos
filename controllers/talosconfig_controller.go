@@ -301,24 +301,21 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if ptr.Deref(config.Status.Initialization.DataSecretCreated, false) {
 		needsPhase2 := ptr.Deref(config.Status.TemplatePatchesPending, false)
 
-		// Self-healing: templatePatchesPending may have been dropped (for example by
-		// a CRD that does not yet carry the field, or a status restore). If the
-		// bootstrap secret does not have the configured dataSecretKey, Phase 2 never
-		// ran and the config is not actually ready.
-		if !needsPhase2 && config.Spec.MetadataFrom != nil && config.Spec.DataSecretKey != "" {
-			if secretName := config.Status.DataSecretName; secretName != "" {
-				if secret, fetchErr := r.fetchSecret(ctx, config, secretName); fetchErr == nil {
-					if _, hasKey := secret.Data[config.Spec.DataSecretKey]; !hasKey {
-						log.Info("bootstrap secret is missing the configured dataSecretKey, re-running template rendering", "key", config.Spec.DataSecretKey)
-						needsPhase2 = true
-					}
+		// Self-healing: templatePatchesPending can be dropped by a CRD without the
+		// field or by a status restore, so check the bootstrap secret for dataSecretKey.
+		if !needsPhase2 && config.Spec.MetadataFrom != nil && config.Spec.DataSecretKey != "" && config.Status.DataSecretName != "" {
+			secret, fetchErr := r.fetchSecret(ctx, config, config.Status.DataSecretName)
+			if fetchErr == nil {
+				if _, hasKey := secret.Data[config.Spec.DataSecretKey]; !hasKey {
+					log.Info("bootstrap secret is missing the configured dataSecretKey, re-running template rendering", "key", config.Spec.DataSecretKey)
+					needsPhase2 = true
 				}
 			}
 		}
 
 		// Pending template patches must not be rendered while the Machine is being updated in
 		// place: rewriting the bootstrap data of a machine that is already running would be
-		// picked up by nothing, and it races with the update extension (bootstrap-config.md:364-365).
+		// picked up by nothing, and it races with the update extension.
 		if needsPhase2 && inPlaceUpdateInProgress(config, owner) {
 			log.Info("TalosConfig is being updated in place, not re-rendering the bootstrap data")
 
@@ -406,10 +403,8 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// In-place updates: while the update extension is updating the Machine in place, the bootstrap
-	// provider must not regenerate the bootstrap data for the changed TalosConfig
-	// (CAPI bootstrap contract, bootstrap-config.md:364-365). The trigger that sets this annotation
-	// on the bootstrap config is KCP's triggerInPlaceUpdate (inplace_trigger.go:108-111).
+	// In-place updates: while the update extension is updating the Machine in place, the
+	// bootstrap provider must not regenerate the bootstrap data for the changed TalosConfig.
 	if inPlaceUpdateInProgress(config, owner) {
 		log.Info("TalosConfig is being updated in place, not regenerating the bootstrap data")
 
@@ -463,9 +458,8 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 // inPlaceUpdateInProgress reports whether Cluster API has marked this TalosConfig, or the Machine
 // owning it, as being updated in place. Cluster API tracks the update on the Machine, the
-// InfraMachine and the bootstrap config separately: the Machine controller reads the annotation off
-// the Machine (core/reconcilers/machine/machine_controller_inplace_update.go:51) and waits for it on
-// the bootstrap config before calling UpdateMachine (machine_controller_inplace_update.go:133-139).
+// InfraMachine and the bootstrap config separately: the Machine controller reads the annotation
+// off the Machine and waits for it on the bootstrap config before calling UpdateMachine.
 // Checking the owner as well as the TalosConfig keeps the bootstrap provider from regenerating
 // bootstrap data for a worker Machine that the MachineSet controller has already moved to a new
 // MachineSet and is updating in place.

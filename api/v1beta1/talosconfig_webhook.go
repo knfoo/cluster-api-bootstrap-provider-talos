@@ -51,9 +51,8 @@ func (r *TalosConfig) ValidateUpdate(ctx context.Context, oldObj *TalosConfig, n
 
 	// The relaxed immutability check is only in effect while the InPlaceUpdates feature gate is
 	// enabled (alpha, off by default). Without the gate no controller performs in-place updates, so
-	// the whole spec stays immutable, exactly as before. Cluster API gates its in-place update code
-	// the same way: KCP's canUpdateMachine returns false when the gate is off
-	// (inplace_canupdatemachine.go:52).
+	// the whole spec stays immutable, exactly as before. Cluster API gates its in-place
+	// update code the same way.
 	if !feature.Gates.Enabled(feature.InPlaceUpdates) {
 		return nil, apierrors.NewBadRequest("TalosConfig.Spec is immutable")
 	}
@@ -61,8 +60,7 @@ func (r *TalosConfig) ValidateUpdate(ctx context.Context, oldObj *TalosConfig, n
 	// In-place updates: only the machine-config content (data, configPatches, strategicPatches)
 	// may change. Everything else in the spec is immutable and needs a rollout.
 	// The classification follows the CAPI bootstrap contract and KCP's CanUpdateMachine, which
-	// patches only the bootstrap config fields that do not decide how the machine is generated
-	// (inplace_canupdatemachine.go:44-87).
+	// patches only the bootstrap config fields that do not decide how the machine is generated.
 	if err := r.validateImmutableFields(old); err != nil {
 		return nil, err
 	}

@@ -48,11 +48,6 @@ type PatchInput struct {
 
 // ApplyPatches returns the machine configuration in base with the patches of
 // in applied to it.
-//
-// This is the patching formerly done inline in
-// controllers/talosconfig_controller.go:513-628 (reconcileGenerate), moved here
-// so the bootstrap controller and the in-place update extension share one
-// implementation.
 func ApplyPatches(base string, in PatchInput) (string, error) {
 	data := base
 
