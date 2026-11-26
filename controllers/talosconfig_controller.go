@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
@@ -437,29 +438,7 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	config.Status.Initialization.DataSecretCreated = ptr.To(true)
-
-	if metadataPending {
-		// Phase 1: the bootstrap secret exists (so the Machine becomes bootstrap
-		// ready and the infrastructure provider can progress), but the patches that
-		// read metadata are not rendered yet. Requeue as a safety net; the Secret
-		// watch normally triggers Phase 2 as soon as the metadata secret appears.
-		config.Status.TemplatePatchesPending = ptr.To(true)
-
-		v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
-		conditions.Set(config, metav1.Condition{
-			Type:   bootstrapv1beta1.DataSecretAvailableCondition,
-			Reason: bootstrapv1beta1.DataSecretAvailableReason,
-			Status: metav1.ConditionTrue,
-		})
-
-		log.Info("metadata not yet available, bootstrap secret created without the rendered template patches (Phase 1)")
-
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// Phase 2 complete, or single phase: metadataFrom is unset or the metadata is
-	// available, so every strategic patch is applied.
-	config.Status.TemplatePatchesPending = ptr.To(false)
+	config.Status.TemplatePatchesPending = ptr.To(metadataPending)
 
 	v1beta1conditions.MarkTrue(config, bootstrapv1beta1.DataSecretAvailableV1Beta1Condition)
 	conditions.Set(config, metav1.Condition{
@@ -468,6 +447,18 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Status: metav1.ConditionTrue,
 	})
 
+	if metadataPending {
+		// Phase 1: the bootstrap secret exists (so the Machine becomes bootstrap
+		// ready and the infrastructure provider can progress), but the patches that
+		// read metadata are not rendered yet. Requeue as a safety net; the Secret
+		// watch normally triggers Phase 2 as soon as the metadata secret appears.
+		log.Info("metadata not yet available, bootstrap secret created without the rendered template patches (Phase 1)")
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Phase 2 complete, or single phase: metadataFrom is unset or the metadata is
+	// available, so every strategic patch is applied.
 	return ctrl.Result{}, nil
 }
 
@@ -480,17 +471,8 @@ func (r *TalosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // bootstrap data for a worker Machine that the MachineSet controller has already moved to a new
 // MachineSet and is updating in place.
 func inPlaceUpdateInProgress(config *bootstrapv1beta1.TalosConfig, owner *ConfigOwner) bool {
-	if _, ok := config.GetAnnotations()[capiv1.UpdateInProgressAnnotation]; ok {
-		return true
-	}
-
-	if owner != nil {
-		if _, ok := owner.GetAnnotations()[capiv1.UpdateInProgressAnnotation]; ok {
-			return true
-		}
-	}
-
-	return false
+	return annotations.HasWithPrefix(capiv1.UpdateInProgressAnnotation, config.GetAnnotations()) ||
+		(owner != nil && annotations.HasWithPrefix(capiv1.UpdateInProgressAnnotation, owner.GetAnnotations()))
 }
 
 // reconcileGenerate generates the Talos machine configuration and writes the
@@ -538,25 +520,16 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 
 	// The config owner is a Machine or a MachinePool. Its infrastructure reference
 	// names the metadata secret of metadataFrom and its kind tells whether the
-	// userdata needs the Talos shebang, so the owner is read once here.
+	// userdata needs the Talos shebang. GetConfigOwner already holds the owner as an
+	// unstructured object, so read those fields from it instead of converting it again.
 	infraRefName, infraKind, machineName := "", "", ""
 
 	if tcScope.ConfigOwner.IsMachinePool() {
-		mp := &capiv1.MachinePool{}
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, mp); err != nil {
-			return false, err
-		}
-
-		infraKind = mp.Spec.Template.Spec.InfrastructureRef.Kind
+		infraKind, _, _ = unstructured.NestedString(tcScope.ConfigOwner.Object, "spec", "template", "spec", "infrastructureRef", "kind")
 	} else {
-		machineObj := &capiv1.Machine{}
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, machineObj); err != nil {
-			return false, err
-		}
-
-		infraRefName = machineObj.Spec.InfrastructureRef.Name
-		infraKind = machineObj.Spec.InfrastructureRef.Kind
-		machineName = machineObj.Name
+		infraRefName, _, _ = unstructured.NestedString(tcScope.ConfigOwner.Object, "spec", "infrastructureRef", "name")
+		infraKind, _, _ = unstructured.NestedString(tcScope.ConfigOwner.Object, "spec", "infrastructureRef", "kind")
+		machineName = tcScope.ConfigOwner.GetName()
 	}
 
 	templateData, metadataPending, err := r.resolveTemplateData(ctx, tcScope, machineName, infraRefName)
