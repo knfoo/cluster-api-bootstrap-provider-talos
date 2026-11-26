@@ -488,6 +488,46 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 
 	config := tcScope.Config
 
+	// The config owner is a Machine or a MachinePool: its infrastructure reference
+	// names the metadata secret of metadataFrom, its kind decides the Talos shebang,
+	// and its version and name feed the generated configuration. A version written
+	// "vX.Y.Z" loses the leading "v"; TrimPrefix leaves it when it is absent.
+	infraRefName, infraKind, machineName, hostname := "", "", "", ""
+	k8sVersion := constants.DefaultKubernetesVersion
+
+	if tcScope.ConfigOwner.IsMachinePool() {
+		mp := &capiv1.MachinePool{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, mp); err != nil {
+			return false, err
+		}
+
+		infraKind = mp.Spec.Template.Spec.InfrastructureRef.Kind
+
+		if mp.Spec.Template.Spec.Version != "" {
+			k8sVersion = strings.TrimPrefix(mp.Spec.Template.Spec.Version, "v")
+		}
+	} else {
+		machineObj := &capiv1.Machine{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, machineObj); err != nil {
+			return false, err
+		}
+
+		infraRefName = machineObj.Spec.InfrastructureRef.Name
+		infraKind = machineObj.Spec.InfrastructureRef.Kind
+		machineName = machineObj.Name
+
+		if machineObj.Spec.Version != "" {
+			k8sVersion = strings.TrimPrefix(machineObj.Spec.Version, "v")
+		}
+
+		// A MachinePool has no single machine identity, so hostname stays empty.
+		if config.Spec.Hostname.Source == bootstrapv1beta1.HostnameSourceMachineName {
+			hostname = tcScope.ConfigOwner.GetName()
+		} else if config.Spec.Hostname.Source == bootstrapv1beta1.HostnameSourceInfrastructureName {
+			hostname = machineObj.Spec.InfrastructureRef.Name
+		}
+	}
+
 	machineType, _ := machine.ParseType(config.Spec.GenerateType) //nolint:errcheck // handle errors later
 
 	switch {
@@ -508,36 +548,13 @@ func (r *TalosConfigReconciler) reconcileGenerate(ctx context.Context, tcScope *
 	// pkg/machineconfig so the bootstrap controller and the in-place update
 	// extension share one implementation.
 	case machineType != machine.TypeUnknown:
-		bootstrapData, stdPatches, err = r.generateConfigs(ctx, tcScope)
+		bootstrapData, stdPatches, err = r.generateConfigs(ctx, tcScope, k8sVersion, hostname)
 		if err != nil {
 			return false, err
 		}
 
 	default:
 		return false, fmt.Errorf("unknown generate type specified: %q", config.Spec.GenerateType)
-	}
-
-	// The config owner is a Machine or a MachinePool. Its infrastructure reference
-	// names the metadata secret of metadataFrom and its kind tells whether the
-	// userdata needs the Talos shebang, so the owner is read once here.
-	infraRefName, infraKind, machineName := "", "", ""
-
-	if tcScope.ConfigOwner.IsMachinePool() {
-		mp := &capiv1.MachinePool{}
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, mp); err != nil {
-			return false, err
-		}
-
-		infraKind = mp.Spec.Template.Spec.InfrastructureRef.Kind
-	} else {
-		machineObj := &capiv1.Machine{}
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(tcScope.ConfigOwner.Object, machineObj); err != nil {
-			return false, err
-		}
-
-		infraRefName = machineObj.Spec.InfrastructureRef.Name
-		infraKind = machineObj.Spec.InfrastructureRef.Kind
-		machineName = machineObj.Name
 	}
 
 	templateData, metadataPending, err := r.resolveTemplateData(ctx, tcScope, machineName, infraRefName)
@@ -675,48 +692,10 @@ func (r *TalosConfigReconciler) userConfigs(ctx context.Context, scope *TalosCon
 }
 
 // generateConfigs resolves the parts of the generation that touch the API
-// server (the secrets bundle, the Kubernetes CA secret, the hostname source and
-// the cluster network) and delegates the machine-config generation itself to
-// pkg/machineconfig. It returns the generated configuration and the standard
-// patches the generator produced.
-func (r *TalosConfigReconciler) generateConfigs(ctx context.Context, scope *TalosConfigScope) (string, []string, error) {
-	// Allow user to override default kube version.
-	// This also handles version being formatted like "vX.Y.Z" instead of without leading 'v'
-	// TrimPrefix returns the string unchanged if the prefix isn't present.
-	k8sVersion := constants.DefaultKubernetesVersion
-	hostname := ""
-
-	if scope.ConfigOwner.IsMachinePool() {
-		mp := &capiv1.MachinePool{}
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(scope.ConfigOwner.Object, mp); err != nil {
-			return "", nil, err
-		}
-
-		if mp.Spec.Template.Spec.Version != "" {
-			k8sVersion = strings.TrimPrefix(mp.Spec.Template.Spec.Version, "v")
-		}
-	} else {
-		machine := &capiv1.Machine{}
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(scope.ConfigOwner.Object, machine); err != nil {
-			return "", nil, err
-		}
-
-		if machine.Spec.Version != "" {
-			k8sVersion = strings.TrimPrefix(machine.Spec.Version, "v")
-		}
-
-		// The hostname is only set for machines, not machine pools: a pool has
-		// no single machine identity.
-		if scope.Config.Spec.Hostname.Source != "" {
-			switch scope.Config.Spec.Hostname.Source {
-			case bootstrapv1beta1.HostnameSourceMachineName:
-				hostname = scope.ConfigOwner.GetName()
-			case bootstrapv1beta1.HostnameSourceInfrastructureName:
-				hostname = machine.Spec.InfrastructureRef.Name
-			}
-		}
-	}
-
+// server (the secrets bundle and the Kubernetes CA secret) and delegates the
+// machine-config generation itself to pkg/machineconfig. It returns the generated
+// configuration and the standard patches the generator produced.
+func (r *TalosConfigReconciler) generateConfigs(ctx context.Context, scope *TalosConfigScope, k8sVersion, hostname string) (string, []string, error) {
 	versionContract, err := machineconfig.VersionContract(scope.Config.Spec.TalosVersion)
 	if err != nil {
 		return "", nil, err
